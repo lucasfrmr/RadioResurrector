@@ -1,9 +1,10 @@
 # 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/pi-radio-autofailover.git
+[git clone https://github.com/lucasfrmr/RadioResurrector.git](https://github.com/lucasfrmr/RadioResurrector.git)
 cd pi-radio-autofailover
 ```
+
 
 # 2. Copy files into place
 
@@ -14,6 +15,7 @@ sudo chmod +x /opt/radio/radio.sh
 ```
 
 # 3. Create a systemd service
+sudo systemctl enable --now radio.service
 
 ```bash
 sudo tee /etc/systemd/system/radio.service > /dev/null <<'EOF'
