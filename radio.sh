@@ -8,7 +8,7 @@ CHUNK_SECONDS=300
 BUFFER_MINUTES=120
 MAX_CHUNKS=$((BUFFER_MINUTES*60/CHUNK_SECONDS))
 CHECK_INTERVAL=10
-PLAYER="mpv --no-video --quiet --volume=90 --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
+PLAYER="mpv --no-video --quiet --volume=90 --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
 
 mkdir -p "$BUFFER_DIR"
 
@@ -59,7 +59,7 @@ start_watcher() {
 play_buffer() {
   echo "[radio] Playing backup buffer..."
   ls -1tr "$BUFFER_DIR"/*.mp3 > "$BUFFER_DIR/loop.m3u" 2>/dev/null
-  mpv --audio-device=alsa --no-video --quiet --volume=90 --loop-playlist=inf "$BUFFER_DIR/loop.m3u" &
+  mpv --no-video --quiet --volume=90 --loop-playlist=inf --audio-device=alsa "$BUFFER_DIR/loop.m3u" &
   MPV_PID=$!
   start_watcher "$MPV_PID"
   wait "$MPV_PID"
