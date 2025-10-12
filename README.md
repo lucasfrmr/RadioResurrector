@@ -14,10 +14,17 @@ sudo cp radio.sh /opt/radio/
 sudo chmod +x /opt/radio/radio.sh
 ```
 
-# 3. Create a systemd service
-sudo systemctl enable --now radio.service
+# 3. Install these packages:
+```
+sudo apt update
+sudo apt install -y ffmpeg mpv
+```
 
-```bash
+# 4. Create a systemd service
+```
+sudo systemctl enable --now radio.service
+```
+```
 sudo tee /etc/systemd/system/radio.service > /dev/null <<'EOF'
 [Unit]
 Description=Auto-recovering radio stream
@@ -36,9 +43,9 @@ WantedBy=multi-user.target
 EOF
 ```
 
-# 4. Enable and start the service
+# 5. Enable and start the service
 
-```bash
+```
 sudo chown -R pi:pi /opt/radio
 sudo chmod -R 755 /opt/radio
 sudo systemctl daemon-reload
