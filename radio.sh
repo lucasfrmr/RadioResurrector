@@ -59,7 +59,7 @@ start_watcher() {
 play_buffer() {
   echo "[radio] Playing backup buffer..."
   ls -1tr "$BUFFER_DIR"/*.mp3 > "$BUFFER_DIR/loop.m3u" 2>/dev/null
-  mpv --no-video --quiet --volume=90 --loop-playlist=inf "$BUFFER_DIR/loop.m3u" &
+  mpv --audio-device=alsa --no-video --quiet --volume=90 --loop-playlist=inf "$BUFFER_DIR/loop.m3u" &
   MPV_PID=$!
   start_watcher "$MPV_PID"
   wait "$MPV_PID"
