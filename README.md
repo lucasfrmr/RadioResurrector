@@ -1,8 +1,8 @@
 # 1. Clone the repository
 
 ```bash
-[git clone https://github.com/lucasfrmr/RadioResurrector.git](https://github.com/lucasfrmr/RadioResurrector.git)
-cd pi-radio-autofailover
+git clone https://github.com/lucasfrmr/RadioResurrector.git
+cd RadioResurrector
 ```
 
 
@@ -45,4 +45,3 @@ sudo systemctl daemon-reload
 sudo systemctl enable radio.service
 sudo systemctl start radio.service
 ```
-````We're waiting for your response to the Copilot confirmation dialog before continuing with the push and commit to your repository.
