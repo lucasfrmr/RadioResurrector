@@ -15,18 +15,29 @@ const readConfig = () => {
     const data = fs.readFileSync(CONFIG_PATH, "utf8");
     return JSON.parse(data);
   } catch {
-    return {};
+    return { streams: [], currentStream: null };
   }
 };
 
 const writeConfig = (cfg) => {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+  fs.writeFileSync(
+    CONFIG_PATH,
+    JSON.stringify(
+      {
+        streams: cfg.streams || [],
+        currentStream: cfg.currentStream || null,
+      },
+      null,
+      2
+    )
+  );
 };
 
 app.get("/api/config", (_req, res) => {
   const cfg = readConfig();
   res.json({
-    streamUrl: cfg.streamUrl || null,
+    streams: cfg.streams || [],
+    currentStream: cfg.currentStream || cfg.streamUrl || null,
     bufferDir: BUFFER_DIR,
   });
 });
@@ -37,9 +48,24 @@ app.post("/api/stream", (req, res) => {
     return res.status(400).json({ error: "Provide a valid http(s) URL" });
   }
   const cfg = readConfig();
-  cfg.streamUrl = url;
+  const streams = new Set(cfg.streams || []);
+  streams.add(url);
+  cfg.streams = Array.from(streams);
+  cfg.currentStream = url;
   writeConfig(cfg);
-  res.json({ ok: true, streamUrl: url });
+  res.json({ ok: true, currentStream: url, streams: cfg.streams });
+});
+
+app.post("/api/stream/select", (req, res) => {
+  const { url } = req.body || {};
+  const cfg = readConfig();
+  const streams = cfg.streams || [];
+  if (!url || !streams.includes(url)) {
+    return res.status(400).json({ error: "Stream not found. Add it first." });
+  }
+  cfg.currentStream = url;
+  writeConfig(cfg);
+  res.json({ ok: true, currentStream: url, streams });
 });
 
 app.post("/api/flush", (_req, res) => {

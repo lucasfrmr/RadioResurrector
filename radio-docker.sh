@@ -28,7 +28,7 @@ detect_player
 
 current_stream() {
   if [ -f "$CONFIG_PATH" ]; then
-    val=$(jq -r '.streamUrl // empty' "$CONFIG_PATH" 2>/dev/null || true)
+    val=$(jq -r '.currentStream // .streamUrl // (.streams[0]? // empty)' "$CONFIG_PATH" 2>/dev/null || true)
     if [ -n "$val" ]; then
       echo "$val"
       return
