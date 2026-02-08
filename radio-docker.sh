@@ -9,8 +9,22 @@ BUFFER_DIR="${BUFFER_DIR:-/opt/radio/buffer}"
 CHUNK_SECONDS="${CHUNK_SECONDS:-300}"
 BUFFER_MINUTES="${BUFFER_MINUTES:-120}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
+VOLUME="${VOLUME:-90}"
 MAX_CHUNKS=$((BUFFER_MINUTES*60/CHUNK_SECONDS))
-PLAYER="mpv --no-video --quiet --volume=90 --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
+
+# Audio backend: auto-detect ALSA; fall back to null (silent) if no device or AUDIO_BACKEND=null
+detect_player() {
+  local ao
+  if [ "${AUDIO_BACKEND:-auto}" = "null" ]; then
+    ao="--ao=null"
+  elif [ -e /dev/snd ] || [ -d /proc/asound ]; then
+    ao="--ao=alsa"
+  else
+    ao="--ao=null"
+  fi
+  PLAYER="mpv --no-video --quiet --volume=${VOLUME} ${ao} --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
+}
+detect_player
 
 current_stream() {
   if [ -f "$CONFIG_PATH" ]; then
@@ -30,9 +44,17 @@ echo "[radio] Buffer duration: ${BUFFER_MINUTES} minutes"
 
 mkdir -p "$BUFFER_DIR"
 
-# Try to set ALSA configuration (may not work in all Docker setups)
-amixer cset numid=3 1 >/dev/null 2>&1 || true
-amixer sset 'PCM' 90% >/dev/null 2>&1 || true
+# Try to set ALSA configuration only if ALSA hardware exists
+if [ -e /dev/snd ] || [ -d /proc/asound ]; then
+  amixer cset numid=3 1 >/dev/null 2>&1 || true
+  amixer sset 'PCM' 90% >/dev/null 2>&1 || true
+fi
+
+start_ui() {
+  node /opt/radio/web/server.js >/opt/radio/ui.log 2>&1 &
+  UI_PID=$!
+  echo "[radio] UI server PID: $UI_PID (listening on ${PORT:-3000})"
+}
 
 # Graceful shutdown handler for Docker
 cleanup() {
@@ -40,6 +62,7 @@ cleanup() {
   kill $REC_PID 2>/dev/null || true
   kill $MPV_PID 2>/dev/null || true
   kill $WATCH_PID 2>/dev/null || true
+  kill $UI_PID 2>/dev/null || true
   exit 0
 }
 
@@ -109,7 +132,8 @@ play_buffer() {
     fi
     sleep 3
   done
-  mpv --no-video --quiet --volume=90 --loop-playlist=inf --audio-device=alsa "$BUFFER_DIR/loop.m3u" &
+  detect_player
+  $PLAYER --loop-playlist=inf "$BUFFER_DIR/loop.m3u" &
   MPV_PID=$!
   start_watcher "$MPV_PID"
   wait "$MPV_PID"
@@ -117,6 +141,7 @@ play_buffer() {
 }
 
 # -------- Main loop --------
+start_ui
 record_stream & 
 REC_PID=$!
 echo "[radio] Recorder PID: $REC_PID"
