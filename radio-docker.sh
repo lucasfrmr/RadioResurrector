@@ -37,6 +37,11 @@ current_stream() {
   echo "$DEFAULT_STREAM"
 }
 
+# Track config changes to restart playback/recording
+config_mtime() {
+  stat -c %Y "$CONFIG_PATH" 2>/dev/null || echo 0
+}
+
 echo "[radio] Starting RadioResurrector..."
 echo "[radio] Stream URL: $(current_stream)"
 echo "[radio] Buffer directory: $BUFFER_DIR"
@@ -145,8 +150,21 @@ start_ui
 record_stream & 
 REC_PID=$!
 echo "[radio] Recorder PID: $REC_PID"
+LAST_CFG_MTIME="$(config_mtime)"
 
 while true; do
+  NEW_MTIME="$(config_mtime)"
+  if [ "$NEW_MTIME" != "$LAST_CFG_MTIME" ]; then
+    echo "[radio] Config changed — reloading stream selection."
+    LAST_CFG_MTIME="$NEW_MTIME"
+    kill $MPV_PID 2>/dev/null || true
+    kill $WATCH_PID 2>/dev/null || true
+    kill $REC_PID 2>/dev/null || true
+    record_stream &
+    REC_PID=$!
+    echo "[radio] Recorder PID: $REC_PID"
+  fi
+
   prune_buffer
 
   if stream_ok; then
