@@ -1,0 +1,6 @@
+.git
+.gitignore
+*.md
+!DOCKER.md
+buffer/
+*.mp3
