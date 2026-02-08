@@ -6,7 +6,7 @@ services:
     container_name: radioresurrector
     restart: unless-stopped
     environment:
-      - STREAM_URL=https://your-stream-url-here
+      - STREAM_URL=https://ice5.somafm.com/live-128-mp3
       - CHUNK_SECONDS=300
       - BUFFER_MINUTES=120
       - CHECK_INTERVAL=10

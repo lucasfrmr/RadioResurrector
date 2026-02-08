@@ -3,11 +3,11 @@
 # Lucas – Feb 2026
 
 # Configuration from environment variables with defaults
-STREAM_URL="[0m[0m${STREAM_URL:-https://findyourownstream.example/stream}"
-BUFFER_DIR="[0m[0m${BUFFER_DIR:-/opt/radio/buffer}"
-CHUNK_SECONDS="[0m[0m${CHUNK_SECONDS:-300}"
-BUFFER_MINUTES="[0m[0m${BUFFER_MINUTES:-120}"
-CHECK_INTERVAL="[0m[0m${CHECK_INTERVAL:-10}"
+STREAM_URL="${STREAM_URL:-https://ice5.somafm.com/live-128-mp3}"
+BUFFER_DIR="${BUFFER_DIR:-/opt/radio/buffer}"
+CHUNK_SECONDS="${CHUNK_SECONDS:-300}"
+BUFFER_MINUTES="${BUFFER_MINUTES:-120}"
+CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 MAX_CHUNKS=$((BUFFER_MINUTES*60/CHUNK_SECONDS))
 PLAYER="mpv --no-video --quiet --volume=90 --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
 
@@ -76,7 +76,23 @@ start_watcher() {
 # -------- Buffer playback --------
 play_buffer() {
   echo "[radio] Playing backup buffer..."
-  ls -1tr "$BUFFER_DIR"/*.mp3 > "$BUFFER_DIR/loop.m3u" 2>/dev/null
+  # Wait until at least one buffered file exists to avoid mpv format errors.
+  local attempts=0
+  while true; do
+    mapfile -t files < <(ls -1tr "$BUFFER_DIR"/*.mp3 2>/dev/null || true)
+    if [ ${#files[@]} -gt 0 ]; then
+      printf "%s\n" "${files[@]}" > "$BUFFER_DIR/loop.m3u"
+      break
+    fi
+    attempts=$((attempts+1))
+    if [ $attempts -eq 1 ]; then
+      echo "[radio] Waiting for buffered audio chunks..."
+    elif [ $attempts -ge 10 ]; then
+      echo "[radio] Still no buffered chunks; continuing to wait."
+      attempts=5  # prevent unbounded message spam
+    fi
+    sleep 3
+  done
   mpv --no-video --quiet --volume=90 --loop-playlist=inf --audio-device=alsa "$BUFFER_DIR/loop.m3u" &
   MPV_PID=$!
   start_watcher "$MPV_PID"
