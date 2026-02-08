@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  radio:
+    build: .
+    container_name: radioresurrector
+    restart: unless-stopped
+    environment:
+      - STREAM_URL=https://your-stream-url-here
+      - CHUNK_SECONDS=300
+      - BUFFER_MINUTES=120
+      - CHECK_INTERVAL=10
+    volumes:
+      - ./buffer:/opt/radio/buffer
+    devices:
+      - /dev/snd:/dev/snd
+    privileged: true
