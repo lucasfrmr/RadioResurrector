@@ -1,0 +1,14 @@
+{
+  "name": "radioresurrector-ui",
+  "version": "1.0.0",
+  "description": "Config UI/API for RadioResurrector",
+  "main": "web/server.js",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node web/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

@@ -1,23 +1,29 @@
-FROM debian:bookworm-slim
+FROM node:18-bullseye-slim
 
-# Install dependencies: ffmpeg for recording, mpv for playback, alsa-utils for volume control.
+# Install audio/recording dependencies.
 RUN apt-get update -y \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ffmpeg \
     mpv \
     alsa-utils \
+    jq \
     ca-certificates \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/radio
 
-# Copy the Docker-friendly script.
+# Install minimal Node deps for the config UI/API.
+COPY package.json package-lock.json ./ 
+RUN npm ci --omit=dev
+
+# Copy app files.
 COPY radio-docker.sh /opt/radio/radio-docker.sh
-RUN chmod +x /opt/radio/radio-docker.sh
+COPY web ./web
 
-# Pre-create buffer directory so it can be volume-mounted.
-RUN mkdir -p /opt/radio/buffer
+RUN chmod +x /opt/radio/radio-docker.sh \
+  && mkdir -p /opt/radio/buffer
 
-# Use bash for the script.
+EXPOSE 3000
+
 CMD ["/bin/bash", "/opt/radio/radio-docker.sh"]

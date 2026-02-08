@@ -2,8 +2,9 @@
 # Docker-compatible version with environment variable support
 # Lucas – Feb 2026
 
-# Configuration from environment variables with defaults
-STREAM_URL="${STREAM_URL:-https://ice5.somafm.com/live-128-mp3}"
+# Configuration with defaults + runtime override via /opt/radio/config.json
+CONFIG_PATH="/opt/radio/config.json"
+DEFAULT_STREAM="${STREAM_URL:-https://ice5.somafm.com/live-128-mp3}"
 BUFFER_DIR="${BUFFER_DIR:-/opt/radio/buffer}"
 CHUNK_SECONDS="${CHUNK_SECONDS:-300}"
 BUFFER_MINUTES="${BUFFER_MINUTES:-120}"
@@ -11,8 +12,19 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 MAX_CHUNKS=$((BUFFER_MINUTES*60/CHUNK_SECONDS))
 PLAYER="mpv --no-video --quiet --volume=90 --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
 
+current_stream() {
+  if [ -f "$CONFIG_PATH" ]; then
+    val=$(jq -r '.streamUrl // empty' "$CONFIG_PATH" 2>/dev/null || true)
+    if [ -n "$val" ]; then
+      echo "$val"
+      return
+    fi
+  fi
+  echo "$DEFAULT_STREAM"
+}
+
 echo "[radio] Starting RadioResurrector..."
-echo "[radio] Stream URL: $STREAM_URL"
+echo "[radio] Stream URL: $(current_stream)"
 echo "[radio] Buffer directory: $BUFFER_DIR"
 echo "[radio] Buffer duration: ${BUFFER_MINUTES} minutes"
 
@@ -39,6 +51,8 @@ prune_buffer() {
 
 record_stream() {
   while true; do
+    local STREAM_URL
+    STREAM_URL="$(current_stream)"
     ffmpeg -hide_banner -loglevel error \
       -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 \
       -headers "User-Agent: Mozilla/5.0\r\n" \
@@ -51,6 +65,8 @@ record_stream() {
 }
 
 stream_ok() {
+  local STREAM_URL
+  STREAM_URL="$(current_stream)"
   timeout 8s ffmpeg -hide_banner -loglevel error \
     -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 \
     -headers "User-Agent: Mozilla/5.0\r\n" \
@@ -109,6 +125,7 @@ while true; do
   prune_buffer
 
   if stream_ok; then
+    STREAM_URL="$(current_stream)"
     echo "[radio] Stream OK — playing live."
     $PLAYER "$STREAM_URL"
     echo "[radio] mpv exited; rechecking..."

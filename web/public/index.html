@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RadioResurrector Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
+    .card { max-width: 560px; margin:0 auto; background:#111827; border:1px solid #1f2937; border-radius:16px; padding:24px; box-shadow:0 20px 60px rgba(0,0,0,0.35);}
+    h1 { margin-top:0; font-size:24px; letter-spacing:0.3px;}
+    label { display:block; font-weight:600; margin-bottom:8px;}
+    input[type=url] { width:100%; padding:12px; border-radius:10px; border:1px solid #334155; background:#0b1221; color:#e2e8f0; }
+    button { margin-top:12px; padding:12px 14px; border:none; border-radius:10px; font-weight:700; cursor:pointer; transition:transform 80ms ease, box-shadow 120ms ease; }
+    button:active { transform:translateY(1px); }
+    .primary { background:#0ea5e9; color:#0b1221; box-shadow:0 10px 30px rgba(14,165,233,0.35);}
+    .ghost { background:#111827; color:#e2e8f0; border:1px solid #334155; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    .small { font-size:13px; color:#94a3b8; margin-top:6px;}
+    #status { margin-top:14px; font-weight:600;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>RadioResurrector</h1>
+    <p class="small" id="bufferInfo"></p>
+    <label for="stream">Stream URL</label>
+    <input id="stream" type="url" placeholder="https://example.com/stream.mp3" required>
+    <div class="row">
+      <button class="primary" onclick="saveStream()">Save Stream</button>
+      <button class="ghost" onclick="flushBuffer()">Flush Buffer</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <script>
+    async function loadConfig() {
+      const res = await fetch('/api/config');
+      const cfg = await res.json();
+      if (cfg.streamUrl) document.getElementById('stream').value = cfg.streamUrl;
+      document.getElementById('bufferInfo').textContent = `Buffer dir: ${cfg.bufferDir || '/opt/radio/buffer'}`;
+    }
+
+    async function saveStream() {
+      const url = document.getElementById('stream').value.trim();
+      const res = await fetch('/api/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ url })
+      });
+      const data = await res.json();
+      setStatus(res.ok ? `Stream set to ${data.streamUrl}` : data.error, res.ok);
+    }
+
+    async function flushBuffer() {
+      const res = await fetch('/api/flush', { method: 'POST' });
+      const data = await res.json();
+      setStatus(res.ok ? `Flushed ${data.removed} file(s)` : data.error, res.ok);
+    }
+
+    function setStatus(msg, ok=true) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.style.color = ok ? '#10b981' : '#f87171';
+    }
+
+    loadConfig();
+  </script>
+</body>
+</html>
