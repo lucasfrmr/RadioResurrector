@@ -53,6 +53,7 @@ app.post("/api/stream", (req, res) => {
   cfg.streams = Array.from(streams);
   cfg.currentStream = url;
   writeConfig(cfg);
+  try { process.kill(1, "SIGHUP"); } catch (e) { /* ignore */ }
   res.json({ ok: true, currentStream: url, streams: cfg.streams });
 });
 
@@ -65,6 +66,7 @@ app.post("/api/stream/select", (req, res) => {
   }
   cfg.currentStream = url;
   writeConfig(cfg);
+  try { process.kill(1, "SIGHUP"); } catch (e) { /* ignore */ }
   res.json({ ok: true, currentStream: url, streams });
 });
 

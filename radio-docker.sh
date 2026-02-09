@@ -68,7 +68,22 @@ cleanup() {
   exit 0
 }
 
+restart_stream() {
+  local CURRENT
+  CURRENT="$(current_stream)"
+  echo "[radio] Restart requested -> $CURRENT"
+  stop_live
+  kill $MPV_PID 2>/dev/null || true
+  kill $WATCH_PID 2>/dev/null || true
+  kill $REC_PID 2>/dev/null || true
+  record_stream &
+  REC_PID=$!
+  LAST_STREAM="$CURRENT"
+  echo "[radio] Recorder PID: $REC_PID"
+}
+
 trap cleanup SIGTERM SIGINT
+trap restart_stream SIGHUP
 
 prune_buffer() {
   ls -1t "$BUFFER_DIR"/*.mp3 2>/dev/null | tail -n +$((MAX_CHUNKS+1)) | xargs -r rm -f
