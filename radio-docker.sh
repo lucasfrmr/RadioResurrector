@@ -11,6 +11,7 @@ BUFFER_MINUTES="${BUFFER_MINUTES:-120}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 VOLUME="${VOLUME:-90}"
 MAX_CHUNKS=$((BUFFER_MINUTES*60/CHUNK_SECONDS))
+LIVE_PID=""
 
 # Audio backend: auto-detect ALSA; fall back to null (silent) if no device or AUDIO_BACKEND=null
 detect_player() {
@@ -60,6 +61,7 @@ start_ui() {
 cleanup() {
   echo "[radio] Shutting down gracefully..."
   kill $REC_PID 2>/dev/null || true
+  kill $LIVE_PID 2>/dev/null || true
   kill $MPV_PID 2>/dev/null || true
   kill $WATCH_PID 2>/dev/null || true
   kill $UI_PID 2>/dev/null || true
@@ -140,6 +142,18 @@ play_buffer() {
   echo "[radio] Buffer playback ended."
 }
 
+start_live() {
+  local url="$1"
+  detect_player
+  $PLAYER "$url" &
+  LIVE_PID=$!
+}
+
+stop_live() {
+  kill $LIVE_PID 2>/dev/null || true
+  LIVE_PID=""
+}
+
 # -------- Main loop --------
 start_ui
 record_stream & 
@@ -152,6 +166,7 @@ while true; do
   if [ "$CURRENT" != "$LAST_STREAM" ]; then
     echo "[radio] Stream selection changed -> $CURRENT"
     LAST_STREAM="$CURRENT"
+    stop_live
     kill $MPV_PID 2>/dev/null || true
     kill $WATCH_PID 2>/dev/null || true
     kill $REC_PID 2>/dev/null || true
@@ -165,7 +180,8 @@ while true; do
   if stream_ok; then
     STREAM_URL="$CURRENT"
     echo "[radio] Stream OK — playing live."
-    $PLAYER "$STREAM_URL"
+    start_live "$STREAM_URL"
+    wait $LIVE_PID
     echo "[radio] mpv exited; rechecking..."
   else
     echo "[radio] Stream DOWN — using buffer."
