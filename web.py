@@ -14,12 +14,16 @@ from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
 
-BASE_DIR         = "/opt/radio"
+# Set RADIO_DIR env var to run locally, e.g.:
+#   RADIO_DIR=/tmp/radio python3 web.py
+BASE_DIR         = os.environ.get("RADIO_DIR", "/opt/radio")
 CONFIG_FILE      = os.path.join(BASE_DIR, "config.json")
 CONFIG_SH        = os.path.join(BASE_DIR, "config.sh")
 BUFFER_DIR       = os.path.join(BASE_DIR, "buffer")
 STATE_FILE       = os.path.join(BASE_DIR, "state.json")
 FORCE_BUFFER     = os.path.join(BASE_DIR, "force_buffer")
+
+os.makedirs(BUFFER_DIR, exist_ok=True)  # ensure dirs exist in dev too
 
 app = Flask(__name__)
 
@@ -153,18 +157,38 @@ _yp_cache = {"genres": None, "by_genre": None, "ts": 0}
 YP_TTL    = 300  # seconds between refreshes
 
 
+YP_URLS = [
+    "https://dir.xiph.org/yp.php",
+    "http://dir.xiph.org/yp.php",
+]
+YP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "application/xml, text/xml, */*",
+}
+
+
 def fetch_yp():
     """Download and cache the Icecast YP XML feed, grouped by genre."""
     with _yp_lock:
         if _yp_cache["genres"] and time.time() - _yp_cache["ts"] < YP_TTL:
             return _yp_cache
 
-        req = urllib.request.Request(
-            "http://dir.xiph.org/yp.php",
-            headers={"User-Agent": "Mozilla/5.0 (RadioResurrector)"},
-        )
-        with urllib.request.urlopen(req, timeout=20) as r:
-            root = ET.fromstring(r.read())
+        last_err = None
+        root = None
+        for url in YP_URLS:
+            try:
+                req = urllib.request.Request(url, headers=YP_HEADERS)
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    root = ET.fromstring(r.read())
+                break
+            except Exception as e:
+                last_err = e
+        if root is None:
+            raise last_err or RuntimeError("Could not fetch YP feed")
 
         by_genre: dict = {}
         for e in root.findall("entry"):
