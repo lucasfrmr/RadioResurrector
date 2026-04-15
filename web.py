@@ -5,6 +5,11 @@ import json
 import os
 import secrets
 import subprocess
+import threading
+import time
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
@@ -137,6 +142,51 @@ def buffer_info():
         "oldest_ts":      oldest_ts or 0,
         "newest_ts":      newest_ts or 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Icecast YP directory
+# ---------------------------------------------------------------------------
+
+_yp_lock  = threading.Lock()
+_yp_cache = {"genres": None, "by_genre": None, "ts": 0}
+YP_TTL    = 300  # seconds between refreshes
+
+
+def fetch_yp():
+    """Download and cache the Icecast YP XML feed, grouped by genre."""
+    with _yp_lock:
+        if _yp_cache["genres"] and time.time() - _yp_cache["ts"] < YP_TTL:
+            return _yp_cache
+
+        req = urllib.request.Request(
+            "http://dir.xiph.org/yp.php",
+            headers={"User-Agent": "Mozilla/5.0 (RadioResurrector)"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            root = ET.fromstring(r.read())
+
+        by_genre: dict = {}
+        for e in root.findall("entry"):
+            name  = (e.findtext("server_name")   or "").strip()
+            url   = (e.findtext("listen_url")     or "").strip()
+            genre = (e.findtext("genre")          or "Other").strip() or "Other"
+            if not name or not url:
+                continue
+            entry = {
+                "name":    name,
+                "url":     url,
+                "bitrate": (e.findtext("bitrate")       or "").strip(),
+                "song":    (e.findtext("current_song")  or "").strip(),
+            }
+            by_genre.setdefault(genre, []).append(entry)
+
+        genres = sorted(
+            [{"name": g, "count": len(v)} for g, v in by_genre.items()],
+            key=lambda x: -x["count"],
+        )
+        _yp_cache.update({"genres": genres, "by_genre": by_genre, "ts": time.time()})
+        return _yp_cache
 
 
 cfg_boot = load_config()
@@ -483,6 +533,15 @@ MAIN_PAGE = """<!doctype html>
   #toast.show { opacity: 1; }
   #toast.error { border-color: var(--red); background: #2d1515; }
 
+  /* Browse button */
+  .btn-browse {
+    background: rgba(167,139,250,.12); border: 1px solid rgba(167,139,250,.3);
+    border-radius: 8px; color: var(--accent-light); cursor: pointer;
+    font-size: .82rem; font-weight: 600; padding: .5rem .9rem;
+    white-space: nowrap; flex-shrink: 0; transition: background .2s;
+  }
+  .btn-browse:hover { background: rgba(167,139,250,.24); }
+
   /* Confirm dialog */
   .overlay {
     display: none; position: fixed; inset: 0;
@@ -499,6 +558,97 @@ MAIN_PAGE = """<!doctype html>
   .dialog p { font-size: .85rem; color: var(--muted); margin-bottom: 1.25rem; }
   .dialog .btn-row { justify-content: center; }
   .dialog .btn { flex: 0 1 auto; min-width: 100px; }
+
+  /* ── Icecast Directory Panel ── */
+  .dir-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.75); z-index: 300;
+    align-items: flex-start; justify-content: center;
+    padding: 1rem; overflow-y: auto;
+  }
+  .dir-overlay.open { display: flex; }
+  .dir-panel {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; width: 100%; max-width: 860px;
+    margin: auto; display: flex; flex-direction: column;
+    max-height: 90dvh;
+  }
+  .dir-header {
+    display: flex; align-items: center; gap: .75rem;
+    padding: 1rem 1.25rem; border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .dir-header h2 { font-size: 1rem; font-weight: 700; flex: 1; }
+  .dir-search {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: .88rem; padding: .45rem .75rem;
+    outline: none; width: 200px; transition: border-color .2s;
+  }
+  .dir-search:focus { border-color: var(--accent-light); }
+  .dir-close {
+    background: none; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--muted); cursor: pointer; font-size: .85rem; padding: .35rem .75rem;
+  }
+  .dir-close:hover { border-color: var(--text); color: var(--text); }
+  .dir-breadcrumb {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .65rem 1.25rem; border-bottom: 1px solid var(--border);
+    font-size: .82rem; color: var(--muted); flex-shrink: 0;
+    min-height: 2.5rem;
+  }
+  .dir-crumb-btn {
+    background: none; border: none; color: var(--accent-light);
+    cursor: pointer; font-size: .82rem; padding: 0; text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .dir-body {
+    overflow-y: auto; flex: 1;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+
+  /* Genre grid */
+  .genre-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: .6rem; padding: 1rem;
+  }
+  .genre-tile {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    cursor: pointer; padding: .75rem .6rem; text-align: center;
+    transition: border-color .15s, background .15s;
+  }
+  .genre-tile:hover { border-color: var(--accent-light); background: rgba(167,139,250,.07); }
+  .genre-tile-name { font-size: .85rem; font-weight: 600; margin-bottom: .25rem; word-break: break-word; }
+  .genre-tile-count { font-size: .72rem; color: var(--muted); }
+
+  /* Stream list */
+  .stream-list { list-style: none; padding: .5rem; }
+  .stream-item {
+    display: flex; align-items: center; gap: .75rem;
+    padding: .7rem .75rem; border-radius: 10px; cursor: pointer;
+    transition: background .15s; border-bottom: 1px solid var(--border);
+  }
+  .stream-item:last-child { border-bottom: none; }
+  .stream-item:hover { background: rgba(167,139,250,.09); }
+  .stream-item-main { flex: 1; min-width: 0; }
+  .stream-item-name { font-size: .9rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stream-item-song { font-size: .75rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: .15rem; }
+  .stream-item-meta { display: flex; flex-direction: column; align-items: flex-end; gap: .2rem; flex-shrink: 0; }
+  .stream-item-bitrate { font-size: .72rem; color: var(--accent-light); font-weight: 700; }
+  .stream-play-hint { font-size: .7rem; color: var(--muted); }
+
+  /* Loading / empty states */
+  .dir-state {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; padding: 3rem 1rem; color: var(--muted);
+    gap: .75rem;
+  }
+  .dir-state .spinner {
+    width: 28px; height: 28px; border: 3px solid var(--border);
+    border-top-color: var(--accent-light); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -556,6 +706,9 @@ MAIN_PAGE = """<!doctype html>
         </select>
         <input type="text" id="streamUrl" value="{{ cfg.stream_url }}"
                placeholder="https://stream.example.com/live">
+        <button class="btn-browse" onclick="openDirectory()" title="Browse Icecast directory">
+          Browse
+        </button>
       </div>
 
       <!-- Mode switch button -->
@@ -723,6 +876,24 @@ MAIN_PAGE = """<!doctype html>
   </div><!-- /col-right -->
 
 </div><!-- /dashboard-grid -->
+
+<!-- ── Icecast Directory Panel ── -->
+<div class="dir-overlay" id="dirOverlay">
+  <div class="dir-panel">
+    <div class="dir-header">
+      <h2>📻 Icecast Directory</h2>
+      <input class="dir-search" id="dirSearch" type="text"
+             placeholder="Filter…" oninput="filterDir()">
+      <button class="dir-close" onclick="closeDirectory()">✕ Close</button>
+    </div>
+    <div class="dir-breadcrumb" id="dirCrumb">
+      <span>All Genres</span>
+    </div>
+    <div class="dir-body" id="dirBody">
+      <div class="dir-state"><span>Loading…</span></div>
+    </div>
+  </div>
+</div>
 
 <!-- Clear Buffer confirmation -->
 <div class="overlay" id="clearOverlay">
@@ -996,6 +1167,146 @@ function changePin() {
   }).catch(() => toast('Failed to update PIN', true));
 }
 
+// ── Icecast Directory ──
+let _dirGenres    = null;   // [{name, count}]
+let _dirStreams    = null;   // [{name, url, bitrate, song}] for current genre
+let _dirGenre     = null;   // currently selected genre name
+let _dirLoaded    = false;
+
+function openDirectory() {
+  document.getElementById('dirOverlay').classList.add('open');
+  document.getElementById('dirSearch').value = '';
+  if (!_dirLoaded) loadGenres();
+}
+function closeDirectory() {
+  document.getElementById('dirOverlay').classList.remove('open');
+}
+
+function loadGenres() {
+  showDirLoading();
+  fetch('/directory/genres')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) throw new Error(d.error);
+      _dirGenres = d.genres;
+      _dirLoaded = true;
+      _dirGenre  = null;
+      _dirStreams = null;
+      showGenres(_dirGenres);
+    })
+    .catch(e => showDirError(e.message));
+}
+
+function loadStreams(genreName) {
+  _dirGenre = genreName;
+  showDirLoading();
+  fetch('/directory/streams?' + new URLSearchParams({genre: genreName}))
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) throw new Error(d.error);
+      _dirStreams = d.streams;
+      showStreams(_dirStreams);
+    })
+    .catch(e => showDirError(e.message));
+}
+
+function filterDir() {
+  const q = document.getElementById('dirSearch').value.trim().toLowerCase();
+  if (_dirGenre) {
+    // filter streams
+    const filtered = q ? _dirStreams.filter(s =>
+      s.name.toLowerCase().includes(q) || s.song.toLowerCase().includes(q)
+    ) : _dirStreams;
+    showStreams(filtered, false);
+  } else {
+    // filter genres
+    const filtered = q ? (_dirGenres || []).filter(g =>
+      g.name.toLowerCase().includes(q)
+    ) : _dirGenres;
+    showGenres(filtered, false);
+  }
+}
+
+function showGenres(genres, updateCrumb=true) {
+  if (updateCrumb) {
+    document.getElementById('dirCrumb').innerHTML = '<span>All Genres</span>';
+  }
+  if (!genres || !genres.length) {
+    document.getElementById('dirBody').innerHTML =
+      '<div class="dir-state"><span>No genres found</span></div>';
+    return;
+  }
+  document.getElementById('dirBody').innerHTML =
+    '<div class="genre-grid">' +
+    genres.map(g =>
+      `<div class="genre-tile" onclick="loadStreams(${JSON.stringify(g.name)})">
+        <div class="genre-tile-name">${esc(g.name)}</div>
+        <div class="genre-tile-count">${g.count} stream${g.count !== 1 ? 's' : ''}</div>
+      </div>`
+    ).join('') +
+    '</div>';
+}
+
+function showStreams(streams, updateCrumb=true) {
+  if (updateCrumb) {
+    document.getElementById('dirCrumb').innerHTML =
+      `<button class="dir-crumb-btn" onclick="backToGenres()">← Genres</button>
+       <span>/</span>
+       <span>${esc(_dirGenre)}</span>
+       <span style="color:var(--muted);margin-left:auto">${streams.length} streams</span>`;
+  }
+  if (!streams.length) {
+    document.getElementById('dirBody').innerHTML =
+      '<div class="dir-state"><span>No streams found</span></div>';
+    return;
+  }
+  document.getElementById('dirBody').innerHTML =
+    '<ul class="stream-list">' +
+    streams.map(s =>
+      `<li class="stream-item" onclick="playDirectoryStream(${JSON.stringify(s.name)}, ${JSON.stringify(s.url)})">
+        <div class="stream-item-main">
+          <div class="stream-item-name">${esc(s.name)}</div>
+          ${s.song ? `<div class="stream-item-song">♪ ${esc(s.song)}</div>` : ''}
+        </div>
+        <div class="stream-item-meta">
+          ${s.bitrate ? `<span class="stream-item-bitrate">${esc(s.bitrate)}k</span>` : ''}
+          <span class="stream-play-hint">▶ Play</span>
+        </div>
+      </li>`
+    ).join('') +
+    '</ul>';
+}
+
+function backToGenres() {
+  _dirGenre = null; _dirStreams = null;
+  document.getElementById('dirSearch').value = '';
+  showGenres(_dirGenres);
+}
+
+function showDirLoading() {
+  document.getElementById('dirBody').innerHTML =
+    '<div class="dir-state"><div class="spinner"></div><span>Loading…</span></div>';
+}
+function showDirError(msg) {
+  document.getElementById('dirBody').innerHTML =
+    `<div class="dir-state"><span style="color:var(--red)">Error: ${esc(msg)}</span></div>`;
+}
+
+function playDirectoryStream(name, url) {
+  closeDirectory();
+  document.getElementById('streamUrl').value = url;
+  const payload = {
+    stream_url:     url,
+    chunk_seconds:  parseInt(document.getElementById('chunkSlider').value),
+    buffer_minutes: parseInt(document.getElementById('bufferSlider').value),
+    check_interval: parseInt(document.getElementById('intervalSlider').value),
+    volume:         parseInt(document.getElementById('volumeSlider').value),
+  };
+  api('/apply', payload)
+    .then(() => toast('▶ Now playing: ' + name))
+    .catch(() => toast('Failed to switch stream', true));
+}
+
 // ── Escape ──
 function esc(s) {
   return String(s)
@@ -1209,6 +1520,30 @@ def change_pin():
     cfg["pin"] = pin
     save_config(cfg)
     return jsonify({"ok": True})
+
+
+@app.route("/directory/genres")
+def dir_genres():
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        data = fetch_yp()
+        return jsonify({"genres": data["genres"]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/directory/streams")
+def dir_streams():
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    genre = request.args.get("genre", "")
+    try:
+        data = fetch_yp()
+        streams = data["by_genre"].get(genre, [])
+        return jsonify({"streams": streams})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
