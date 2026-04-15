@@ -232,31 +232,18 @@ MAIN_PAGE = """<!doctype html>
     grid-template-columns: 1fr;
     gap: 1rem;
   }
-  @media (min-width: 680px) {
+  @media (min-width: 900px) {
     .dashboard-grid {
-      grid-template-columns: 2fr 1.5fr 1.5fr;
+      grid-template-columns: minmax(0,2fr) minmax(0,1.5fr) minmax(0,1.5fr);
       gap: 1.25rem;
       align-items: start;
-    }
-    .col-left {
-      grid-column: 1;
-      grid-row: 1;
-    }
-    .col-log {
-      grid-column: 2;
-      grid-row: 1;
-      position: sticky;
-      top: 1rem;
-    }
-    .col-buffer {
-      grid-column: 3;
-      grid-row: 1;
-      position: sticky;
-      top: 1rem;
     }
     .log-body { height: 420px; }
     .chunk-list-wrap { max-height: 340px; }
   }
+  /* Prevent long URLs from forcing column widths */
+  .stream-row select, .stream-row input { min-width: 0; }
+  .preset-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Header */
   header {
@@ -570,7 +557,7 @@ MAIN_PAGE = """<!doctype html>
           <option value="{{ s.url }}">{{ s.name }}</option>
           {% endfor %}
         </select>
-        <input type="text" id="streamUrl" value="{{ cfg.stream_url }}"
+        <input type="text" id="streamUrl" value="{{ cfg.stream_url }}">
       </div>
 
       <!-- Mode switch button -->
