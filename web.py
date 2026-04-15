@@ -219,8 +219,28 @@ MAIN_PAGE = """<!doctype html>
   body {
     background: var(--bg); color: var(--text);
     font-family: system-ui, sans-serif;
-    padding: 1rem; padding-bottom: 5rem;
-    max-width: 640px; margin: 0 auto;
+    padding: 1rem 1.25rem; padding-bottom: 4rem;
+    max-width: 1200px; margin: 0 auto;
+  }
+
+  /* ── Two-column grid on desktop ── */
+  .dashboard-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  @media (min-width: 780px) {
+    .dashboard-grid {
+      grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+      gap: 1.25rem;
+      align-items: start;
+    }
+    .col-right {
+      position: sticky;
+      top: 1rem;
+    }
+    .log-body { height: 340px; }
+    .chunk-list-wrap { max-height: 220px; }
   }
 
   /* Header */
@@ -493,212 +513,216 @@ MAIN_PAGE = """<!doctype html>
   </form>
 </header>
 
-<!-- ── Now Playing ── -->
-<div class="now-playing">
-  <div class="np-top">
-    <span class="np-badge {{ state.mode }}" id="npBadge">
-      <span class="pulse"></span>
-      <span id="npMode">{{ state.mode | upper }}</span>
-    </span>
-    <span class="np-duration" id="npDuration">—</span>
-  </div>
+<div class="dashboard-grid">
 
-  <!-- Title: stream name or "Buffer Playback" -->
-  <div class="np-title" id="npTitle">
-    {% if state.mode in ('live', 'starting') %}
-      {{ state.name or state.url }}
-    {% elif state.mode in ('buffer', 'forced') %}
-      Buffer Playback
-    {% else %}
-      —
-    {% endif %}
-  </div>
+  <!-- ══ LEFT COLUMN — controls ══ -->
+  <div class="col-left">
 
-  <!-- Subtitle: URL or buffer stats -->
-  <div class="np-subtitle" id="npSubtitle">
-    {% if state.mode in ('live', 'starting') %}
-      {{ state.url }}
-    {% elif state.mode in ('buffer', 'forced') %}
-      {{ buf.chunk_count }} chunks &middot; {{ (buf.covers_seconds // 60) }} min &middot; {{ '%.1f' % (buf.total_bytes / 1048576) }} MB on disk
-    {% endif %}
-  </div>
+    <!-- ── Now Playing (+ stream selector) ── -->
+    <div class="now-playing">
+      <div class="np-top">
+        <span class="np-badge {{ state.mode }}" id="npBadge">
+          <span class="pulse"></span>
+          <span id="npMode">{{ state.mode | upper }}</span>
+        </span>
+        <span class="np-duration" id="npDuration">—</span>
+      </div>
 
-  <div class="svc-row">
-    <div class="dot {{ svc_status }}" id="svcDot"></div>
-    <span class="svc-label" id="svcLabel">radio.service — {{ svc_status }}</span>
-  </div>
+      <div class="np-title" id="npTitle">
+        {% if state.mode in ('live', 'starting') %}{{ state.name or state.url }}
+        {% elif state.mode in ('buffer', 'forced') %}Buffer Playback
+        {% else %}—{% endif %}
+      </div>
+      <div class="np-subtitle" id="npSubtitle">
+        {% if state.mode in ('live', 'starting') %}{{ state.url }}
+        {% elif state.mode in ('buffer', 'forced') %}
+          {{ buf.chunk_count }} chunks &middot; {{ (buf.covers_seconds // 60) }} min &middot; {{ '%.1f' % (buf.total_bytes / 1048576) }} MB on disk
+        {% endif %}
+      </div>
 
-  <!-- Mode switch button -->
-  {% if state.mode in ('buffer', 'forced') %}
-  <button class="btn-mode to-live" id="modeBtn" onclick="switchMode('live')">
-    ↑ Resume Live Stream
-  </button>
-  {% else %}
-  <button class="btn-mode to-buffer" id="modeBtn" onclick="switchMode('buffer')">
-    ↓ Switch to Buffer
-  </button>
-  {% endif %}
-</div>
+      <div class="svc-row">
+        <div class="dot {{ svc_status }}" id="svcDot"></div>
+        <span class="svc-label" id="svcLabel">radio.service — {{ svc_status }}</span>
+      </div>
 
-<!-- ── Log Terminal ── -->
-<div class="terminal-card">
-  <div class="terminal-header">
-    <span class="terminal-title">⬛ radio.service log</span>
-    <div class="terminal-actions">
-      <button class="btn-tiny" id="scrollLockBtn" onclick="toggleScrollLock()">Auto-scroll ✓</button>
-      <button class="btn-tiny" onclick="clearLog()">Clear</button>
+      <!-- Stream selector lives here, next to the status -->
+      <div class="card-title" style="margin-bottom:.6rem">📡 Stream</div>
+      <div class="stream-row" style="margin-bottom:1rem">
+        <select id="presetSelect" onchange="applyPreset()">
+          <option value="">— Preset —</option>
+          {% for s in cfg.streams %}
+          <option value="{{ s.url }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" id="streamUrl" value="{{ cfg.stream_url }}"
+               placeholder="https://stream.example.com/live">
+      </div>
+
+      <!-- Mode switch button -->
+      {% if state.mode in ('buffer', 'forced') %}
+      <button class="btn-mode to-live" id="modeBtn" onclick="switchMode('live')">
+        ↑ Resume Live Stream
+      </button>
+      {% else %}
+      <button class="btn-mode to-buffer" id="modeBtn" onclick="switchMode('buffer')">
+        ↓ Switch to Buffer
+      </button>
+      {% endif %}
     </div>
-  </div>
-  <div class="log-body" id="logBody"></div>
-</div>
 
-<!-- ── Buffer Monitor ── -->
-<div class="card">
-  <div class="card-title">📼 Buffer</div>
-  <div class="buf-stats">
-    <div class="buf-stat">
-      <span class="buf-stat-val" id="bChunks">{{ buf.chunk_count }}</span>
-      <span class="buf-stat-lbl">chunks</span>
+    <!-- ── Volume ── -->
+    <div class="card">
+      <div class="card-title">🔊 Volume</div>
+      <div class="slider-row">
+        <div class="slider-header">
+          <span class="slider-label">Output Level</span>
+          <span class="slider-value" id="volDisplay">{{ cfg.volume }}%</span>
+        </div>
+        <input type="range" id="volumeSlider" min="0" max="100" value="{{ cfg.volume }}" step="1">
+      </div>
     </div>
-    <div class="buf-stat">
-      <span class="buf-stat-val" id="bCovers">{{ (buf.covers_seconds // 60) }}m</span>
-      <span class="buf-stat-lbl">covered</span>
+
+    <!-- ── Recording Settings ── -->
+    <div class="card">
+      <div class="card-title">⏺ Recording Settings</div>
+      <div class="slider-row">
+        <div class="slider-header">
+          <span class="slider-label">Chunk Size</span>
+          <span class="slider-value" id="chunkDisplay">{{ cfg.chunk_seconds }}s</span>
+        </div>
+        <input type="range" id="chunkSlider" min="60" max="600" value="{{ cfg.chunk_seconds }}" step="30"
+               oninput="document.getElementById('chunkDisplay').textContent=this.value+'s'">
+      </div>
+      <div class="slider-row">
+        <div class="slider-header">
+          <span class="slider-label">Buffer Duration</span>
+          <span class="slider-value" id="bufferDisplay">{{ cfg.buffer_minutes }}m</span>
+        </div>
+        <input type="range" id="bufferSlider" min="30" max="360" value="{{ cfg.buffer_minutes }}" step="30"
+               oninput="document.getElementById('bufferDisplay').textContent=this.value+'m'">
+      </div>
+      <div class="slider-row">
+        <div class="slider-header">
+          <span class="slider-label">Check Interval</span>
+          <span class="slider-value" id="intervalDisplay">{{ cfg.check_interval }}s</span>
+        </div>
+        <input type="range" id="intervalSlider" min="5" max="60" value="{{ cfg.check_interval }}" step="5"
+               oninput="document.getElementById('intervalDisplay').textContent=this.value+'s'">
+      </div>
     </div>
-    <div class="buf-stat">
-      <span class="buf-stat-val" id="bSize">{{ '%.1f' % (buf.total_bytes / 1048576) }}MB</span>
-      <span class="buf-stat-lbl">on disk</span>
+
+    <!-- ── Apply ── -->
+    <div class="card">
+      <div class="card-title">Apply Changes</div>
+      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">
+        Saves all settings and restarts the radio service.
+      </p>
+      <button class="btn btn-primary" style="width:100%" onclick="applySettings()">Apply &amp; Restart</button>
     </div>
-  </div>
-  <div class="fill-bar-wrap">
-    <div class="fill-bar-inner" id="fillBar"
-         style="width:{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%"></div>
-  </div>
-  <div class="fill-bar-label">
-    <span id="fillLabel">{{ buf.chunk_count }} / {{ buf.max_chunks }} chunks</span>
-    <span id="fillPct">{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%</span>
-  </div>
-  <div class="chunk-list-wrap">
-    <table class="chunk-list">
-      <thead><tr><th>File</th><th>Size</th><th>Age</th></tr></thead>
-      <tbody id="chunkTable">
-        {% for f in buf.files | reverse %}
-        <tr>
-          <td>{{ f.name }}</td>
-          <td class="dim">{{ '%.1f' % (f.size / 1048576) }} MB</td>
-          <td class="dim right" data-ts="{{ f.mtime }}">—</td>
-        </tr>
-        {% else %}
-        <tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>
+
+    <!-- ── Service Controls ── -->
+    <div class="card">
+      <div class="card-title">⚙ Service</div>
+      <div class="btn-row">
+        <button class="btn btn-success" onclick="serviceAction('start')">Start</button>
+        <button class="btn btn-ghost" onclick="serviceAction('restart')">Restart</button>
+        <button class="btn btn-danger" onclick="serviceAction('stop')">Stop</button>
+      </div>
+    </div>
+
+    <!-- ── Stream Presets ── -->
+    <div class="card">
+      <div class="card-title">📋 Stream Presets</div>
+      <ul class="preset-list" id="presetList">
+        {% for s in cfg.streams %}
+        <li class="preset-item" data-url="{{ s.url }}">
+          <span class="preset-name">{{ s.name }}</span>
+          <span class="preset-url">{{ s.url }}</span>
+          <button class="btn btn-sm btn-danger" onclick="removePreset('{{ s.url }}')">✕</button>
+        </li>
         {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
-</div>
-
-<!-- ── Volume ── -->
-<div class="card">
-  <div class="card-title">🔊 Volume</div>
-  <div class="slider-row">
-    <div class="slider-header">
-      <span class="slider-label">Output Level</span>
-      <span class="slider-value" id="volDisplay">{{ cfg.volume }}%</span>
+      </ul>
+      <div class="add-preset-row">
+        <input type="text" id="newPresetName" placeholder="Name">
+        <input type="text" id="newPresetUrl" placeholder="Stream URL">
+        <button class="btn btn-sm btn-primary" onclick="addPreset()">Add</button>
+      </div>
     </div>
-    <input type="range" id="volumeSlider" min="0" max="100" value="{{ cfg.volume }}" step="1">
-  </div>
-</div>
 
-<!-- ── Stream ── -->
-<div class="card">
-  <div class="card-title">📡 Stream</div>
-  <div class="stream-row">
-    <select id="presetSelect" onchange="applyPreset()">
-      <option value="">— Preset —</option>
-      {% for s in cfg.streams %}
-      <option value="{{ s.url }}">{{ s.name }}</option>
-      {% endfor %}
-    </select>
-    <input type="text" id="streamUrl" value="{{ cfg.stream_url }}"
-           placeholder="https://stream.example.com/live">
-  </div>
-</div>
-
-<!-- ── Recording Settings ── -->
-<div class="card">
-  <div class="card-title">⏺ Recording Settings</div>
-  <div class="slider-row">
-    <div class="slider-header">
-      <span class="slider-label">Chunk Size</span>
-      <span class="slider-value" id="chunkDisplay">{{ cfg.chunk_seconds }}s</span>
+    <!-- ── Change PIN ── -->
+    <div class="card">
+      <div class="card-title">🔒 Change PIN</div>
+      <div class="pin-row">
+        <input type="password" id="newPin" inputmode="numeric" pattern="[0-9]*"
+               maxlength="8" placeholder="New PIN">
+        <button class="btn btn-primary btn-sm" onclick="changePin()">Save PIN</button>
+      </div>
     </div>
-    <input type="range" id="chunkSlider" min="60" max="600" value="{{ cfg.chunk_seconds }}" step="30"
-           oninput="document.getElementById('chunkDisplay').textContent=this.value+'s'">
-  </div>
-  <div class="slider-row">
-    <div class="slider-header">
-      <span class="slider-label">Buffer Duration</span>
-      <span class="slider-value" id="bufferDisplay">{{ cfg.buffer_minutes }}m</span>
+
+  </div><!-- /col-left -->
+
+  <!-- ══ RIGHT COLUMN — monitoring ══ -->
+  <div class="col-right">
+
+    <!-- ── Log Terminal ── -->
+    <div class="terminal-card">
+      <div class="terminal-header">
+        <span class="terminal-title">⬛ radio.service log</span>
+        <div class="terminal-actions">
+          <button class="btn-tiny" id="scrollLockBtn" onclick="toggleScrollLock()">Auto-scroll ✓</button>
+          <button class="btn-tiny" onclick="clearLog()">Clear</button>
+        </div>
+      </div>
+      <div class="log-body" id="logBody"></div>
     </div>
-    <input type="range" id="bufferSlider" min="30" max="360" value="{{ cfg.buffer_minutes }}" step="30"
-           oninput="document.getElementById('bufferDisplay').textContent=this.value+'m'">
-  </div>
-  <div class="slider-row">
-    <div class="slider-header">
-      <span class="slider-label">Check Interval</span>
-      <span class="slider-value" id="intervalDisplay">{{ cfg.check_interval }}s</span>
+
+    <!-- ── Buffer Monitor ── -->
+    <div class="card">
+      <div class="card-title">📼 Buffer</div>
+      <div class="buf-stats">
+        <div class="buf-stat">
+          <span class="buf-stat-val" id="bChunks">{{ buf.chunk_count }}</span>
+          <span class="buf-stat-lbl">chunks</span>
+        </div>
+        <div class="buf-stat">
+          <span class="buf-stat-val" id="bCovers">{{ (buf.covers_seconds // 60) }}m</span>
+          <span class="buf-stat-lbl">covered</span>
+        </div>
+        <div class="buf-stat">
+          <span class="buf-stat-val" id="bSize">{{ '%.1f' % (buf.total_bytes / 1048576) }}MB</span>
+          <span class="buf-stat-lbl">on disk</span>
+        </div>
+      </div>
+      <div class="fill-bar-wrap">
+        <div class="fill-bar-inner" id="fillBar"
+             style="width:{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%"></div>
+      </div>
+      <div class="fill-bar-label">
+        <span id="fillLabel">{{ buf.chunk_count }} / {{ buf.max_chunks }} chunks</span>
+        <span id="fillPct">{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%</span>
+      </div>
+      <div class="chunk-list-wrap">
+        <table class="chunk-list">
+          <thead><tr><th>File</th><th>Size</th><th>Age</th></tr></thead>
+          <tbody id="chunkTable">
+            {% for f in buf.files | reverse %}
+            <tr>
+              <td>{{ f.name }}</td>
+              <td class="dim">{{ '%.1f' % (f.size / 1048576) }} MB</td>
+              <td class="dim right" data-ts="{{ f.mtime }}">—</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
     </div>
-    <input type="range" id="intervalSlider" min="5" max="60" value="{{ cfg.check_interval }}" step="5"
-           oninput="document.getElementById('intervalDisplay').textContent=this.value+'s'">
-  </div>
-</div>
 
-<!-- ── Apply ── -->
-<div class="card">
-  <div class="card-title">Apply Changes</div>
-  <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">
-    Saves all settings and restarts the radio service.
-  </p>
-  <button class="btn btn-primary" style="width:100%" onclick="applySettings()">Apply &amp; Restart</button>
-</div>
+  </div><!-- /col-right -->
 
-<!-- ── Service Controls ── -->
-<div class="card">
-  <div class="card-title">⚙ Service</div>
-  <div class="btn-row">
-    <button class="btn btn-success" onclick="serviceAction('start')">Start</button>
-    <button class="btn btn-ghost" onclick="serviceAction('restart')">Restart</button>
-    <button class="btn btn-danger" onclick="serviceAction('stop')">Stop</button>
-  </div>
-</div>
-
-<!-- ── Stream Presets ── -->
-<div class="card">
-  <div class="card-title">📋 Stream Presets</div>
-  <ul class="preset-list" id="presetList">
-    {% for s in cfg.streams %}
-    <li class="preset-item" data-url="{{ s.url }}">
-      <span class="preset-name">{{ s.name }}</span>
-      <span class="preset-url">{{ s.url }}</span>
-      <button class="btn btn-sm btn-danger" onclick="removePreset('{{ s.url }}')">✕</button>
-    </li>
-    {% endfor %}
-  </ul>
-  <div class="add-preset-row">
-    <input type="text" id="newPresetName" placeholder="Name">
-    <input type="text" id="newPresetUrl" placeholder="Stream URL">
-    <button class="btn btn-sm btn-primary" onclick="addPreset()">Add</button>
-  </div>
-</div>
-
-<!-- ── Change PIN ── -->
-<div class="card">
-  <div class="card-title">🔒 Change PIN</div>
-  <div class="pin-row">
-    <input type="password" id="newPin" inputmode="numeric" pattern="[0-9]*"
-           maxlength="8" placeholder="New PIN">
-    <button class="btn btn-primary btn-sm" onclick="changePin()">Save PIN</button>
-  </div>
-</div>
+</div><!-- /dashboard-grid -->
 
 <!-- Clear Buffer confirmation -->
 <div class="overlay" id="clearOverlay">
