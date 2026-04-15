@@ -223,8 +223,7 @@ MAIN_PAGE = """<!doctype html>
   body {
     background: var(--bg); color: var(--text);
     font-family: system-ui, sans-serif;
-    padding: 1rem 1.25rem; padding-bottom: 4rem;
-    max-width: 1200px; margin: 0 auto;
+    padding: 1rem 2rem; padding-bottom: 4rem;
   }
 
   /* ── Two-column grid on desktop ── */
@@ -615,25 +614,6 @@ MAIN_PAGE = """<!doctype html>
       </div>
     </div>
 
-    <!-- ── Apply ── -->
-    <div class="card">
-      <div class="card-title">Apply Changes</div>
-      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">
-        Saves all settings and restarts the radio service.
-      </p>
-      <button class="btn btn-primary" style="width:100%" onclick="applySettings()">Apply &amp; Restart</button>
-    </div>
-
-    <!-- ── Service Controls ── -->
-    <div class="card">
-      <div class="card-title">⚙ Service</div>
-      <div class="btn-row">
-        <button class="btn btn-success" onclick="serviceAction('start')">Start</button>
-        <button class="btn btn-ghost" onclick="serviceAction('restart')">Restart</button>
-        <button class="btn btn-danger" onclick="serviceAction('stop')">Stop</button>
-      </div>
-    </div>
-
     <!-- ── Stream Presets ── -->
     <div class="card">
       <div class="card-title">📋 Stream Presets</div>
@@ -650,6 +630,25 @@ MAIN_PAGE = """<!doctype html>
         <input type="text" id="newPresetName" placeholder="Name">
         <input type="text" id="newPresetUrl" placeholder="Stream URL">
         <button class="btn btn-sm btn-primary" onclick="addPreset()">Add</button>
+      </div>
+    </div>
+
+    <!-- ── Apply ── -->
+    <div class="card">
+      <div class="card-title">Apply Changes</div>
+      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">
+        Saves all settings and restarts the radio service.
+      </p>
+      <button class="btn btn-primary" style="width:100%" onclick="applySettings()">Apply &amp; Restart</button>
+    </div>
+
+    <!-- ── Service Controls ── -->
+    <div class="card">
+      <div class="card-title">⚙ Service</div>
+      <div class="btn-row">
+        <button class="btn btn-success" onclick="serviceAction('start')">Start</button>
+        <button class="btn btn-ghost" onclick="serviceAction('restart')">Restart</button>
+        <button class="btn btn-danger" onclick="serviceAction('stop')">Stop</button>
       </div>
     </div>
 
