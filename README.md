@@ -4,82 +4,65 @@ A self-healing radio stream system for Raspberry Pi.
 It continuously streams and records an online radio feed, keeping a rolling 2-hour backup.  
 If the internet or stream goes down, it automatically switches to the cached buffer until the connection returns — then seamlessly resumes live playback.
 
+A **PIN-protected web interface** lets you control everything from any device on your network — change streams, adjust volume, tune chunk sizes, and manage the buffer, all without touching the Pi.
+
 ---
 
-# 1. Clone the repository
+# 1. Clone and run the setup script
 
 ```bash
 git clone https://github.com/lucasfrmr/RadioResurrector.git
 cd RadioResurrector
+sudo bash setup.sh
 ```
+
+That's it. The script installs dependencies, copies files to `/opt/radio`, creates both systemd services, and starts everything automatically.
 
 ---
 
-# 2. Install required packages
+# 2. Open the web interface
 
+Find your Pi's IP address:
 ```bash
-sudo apt update
-sudo apt install -y ffmpeg mpv alsa-utils
+hostname -I
 ```
+
+Then open a browser on any device on the same network:
+```
+http://<pi-ip>:8080
+```
+
+The default PIN is **1234** — change it immediately from the dashboard.
+
+### Web interface controls
+
+| Control | Description |
+|---|---|
+| **Volume** | Live slider — updates the audio level instantly |
+| **Stream URL** | Paste any stream URL, or choose a saved preset |
+| **Chunk Size** | How many seconds per buffer file (60–600 s) |
+| **Buffer Duration** | How much history to keep (30–360 min) |
+| **Check Interval** | How often to test the live stream (5–60 s) |
+| **Apply & Restart** | Saves all settings and restarts the radio service |
+| **Start / Restart / Stop** | Direct service controls |
+| **Stream Presets** | Save and manage favourite stream URLs |
+| **Change PIN** | Update the web interface PIN (4–8 digits) |
 
 ---
 
-# 3.Grant permissions
+# 3. Monitor service logs
 
 ```bash
-sudo mkdir -p /opt/radio
-sudo mkdir -p /opt/radio/buffer
-sudo cp radio.sh /opt/radio/
-sudo cp README.md /opt/radio/
-sudo chmod +x /opt/radio/radio.sh
-```
-
----
-
-# 4. Create the systemd service
-
-```bash
-sudo tee /etc/systemd/system/radio.service > /dev/null <<'EOF'
-[Unit]
-Description=Auto-recovering radio stream
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/opt/radio/radio.sh
-Restart=always
-RestartSec=10
-User=pi
-WorkingDirectory=/opt/radio
-
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
----
-
-# 5. Enable and start the service
-
-```bash
-sudo chown -R pi:pi /opt/radio
-sudo chmod -R 755 /opt/radio
-sudo systemctl daemon-reload
-sudo systemctl enable radio.service
-sudo systemctl start radio.service
-```
-
----
-
-# 6. Monitor the service logs
-
-```bash
+# Radio stream logs
 sudo journalctl -fu radio.service
+
+# Web interface logs
+sudo journalctl -fu radio-web.service
 ```
 
 ---
 
-# 7. Test failover
+# 4. Test failover
 
 To simulate an internet outage:
 ```bash
@@ -94,46 +77,37 @@ sudo ip route del blackhole 0.0.0.0/0
 
 ---
 
-# 8. Edit stream settings
-
-Open the main script:
-```bash
-sudo nano /opt/radio/radio.sh
-```
-
-Change the stream URL:
-```bash
-STREAM_URL="https://your-stream-url-here"
-```
-
-You can also modify:
-- `CHUNK_SECONDS` — recording chunk length (default 300s)
-- `BUFFER_MINUTES` — how much history to keep (default 120 min)
-- `CHECK_INTERVAL` — how often to check stream (default 10s)
-
----
-
-# 9. File locations
+# 5. File locations
 
 ```
 /opt/radio/
- ├── radio.sh         # Main script
+ ├── radio.sh         # Main stream script
+ ├── web.py           # Web interface server
+ ├── config.json      # Settings (managed by web UI)
+ ├── config.sh        # Shell-sourced config (written by web UI)
  ├── README.md        # Documentation
- └── buffer/          # Rolling 2-hour audio buffer
+ └── buffer/          # Rolling audio buffer
 /etc/systemd/system/radio.service
+/etc/systemd/system/radio-web.service
 ```
 
 ---
 
-# 10. Maintenance
+# 6. Maintenance
 
 Clear buffer files:
 ```bash
 sudo rm -f /opt/radio/buffer/*.mp3
 ```
 
-Restart service manually:
+Restart both services:
 ```bash
+sudo systemctl restart radio.service radio-web.service
+```
+
+Edit settings manually (or use the web UI):
+```bash
+sudo nano /opt/radio/config.json
 sudo systemctl restart radio.service
 ```
 
@@ -142,4 +116,3 @@ sudo systemctl restart radio.service
 # License
 
 MIT License © 2025 Lucas Farmer
-```

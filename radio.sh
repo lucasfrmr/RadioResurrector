@@ -2,18 +2,28 @@
 # FINAL version — heartbeat watcher auto-switches back to live
 # Lucas – Oct 2025
 
-STREAM_URL="https://findyourownstream.example/stream"
+# Load config written by the web interface (if present)
+CONFIG_SH="/opt/radio/config.sh"
+if [[ -f "$CONFIG_SH" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG_SH"
+fi
+
+# Defaults (used only when config.sh does not exist yet)
+STREAM_URL="${STREAM_URL:-https://findyourownstream.example/stream}"
+CHUNK_SECONDS="${CHUNK_SECONDS:-300}"
+BUFFER_MINUTES="${BUFFER_MINUTES:-120}"
+CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
+VOLUME="${VOLUME:-90}"
+
 BUFFER_DIR="/opt/radio/buffer"
-CHUNK_SECONDS=300
-BUFFER_MINUTES=120
-MAX_CHUNKS=$((BUFFER_MINUTES*60/CHUNK_SECONDS))
-CHECK_INTERVAL=10
-PLAYER="mpv --no-video --quiet --volume=90 --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
+MAX_CHUNKS=$(( BUFFER_MINUTES * 60 / CHUNK_SECONDS ))
+PLAYER="mpv --no-video --quiet --volume=${VOLUME} --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
 
 mkdir -p "$BUFFER_DIR"
 
 amixer cset numid=3 1 >/dev/null 2>&1
-amixer sset 'PCM' 90% >/dev/null 2>&1
+amixer sset 'PCM' "${VOLUME}%" >/dev/null 2>&1
 
 prune_buffer() {
   ls -1t "$BUFFER_DIR"/*.mp3 2>/dev/null | tail -n +$((MAX_CHUNKS+1)) | xargs -r rm -f
@@ -59,7 +69,7 @@ start_watcher() {
 play_buffer() {
   echo "[radio] Playing backup buffer..."
   ls -1tr "$BUFFER_DIR"/*.mp3 > "$BUFFER_DIR/loop.m3u" 2>/dev/null
-  mpv --no-video --quiet --volume=90 --loop-playlist=inf --audio-device=alsa "$BUFFER_DIR/loop.m3u" &
+  mpv --no-video --quiet --volume="${VOLUME}" --loop-playlist=inf --audio-device=alsa "$BUFFER_DIR/loop.m3u" &
   MPV_PID=$!
   start_watcher "$MPV_PID"
   wait "$MPV_PID"
@@ -67,7 +77,7 @@ play_buffer() {
 }
 
 # -------- Main loop --------
-record_stream & 
+record_stream &
 REC_PID=$!
 echo "[radio] Recorder PID: $REC_PID"
 
