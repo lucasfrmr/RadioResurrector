@@ -226,22 +226,14 @@ MAIN_PAGE = """<!doctype html>
     padding: 1rem 2rem; padding-bottom: 4rem;
   }
 
-  /* ── Layout: controls | log | buffer ── */
+  /* ── Single-column layout, full page width ── */
   .dashboard-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 1rem;
+    display: block;
+    max-width: 1100px;
+    margin: 0 auto;
   }
-  @media (min-width: 900px) {
-    .dashboard-grid {
-      grid-template-columns: minmax(0,2fr) minmax(0,1.5fr) minmax(0,1.5fr);
-      gap: 1.25rem;
-      align-items: start;
-    }
-    .log-body { height: 420px; }
-    .chunk-list-wrap { max-height: 340px; }
-  }
-  /* Prevent long URLs from forcing column widths */
+  .log-body { height: 340px; }
+  .chunk-list-wrap { max-height: 320px; }
   .stream-row select, .stream-row input { min-width: 0; }
   .preset-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
