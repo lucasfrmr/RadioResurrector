@@ -226,25 +226,36 @@ MAIN_PAGE = """<!doctype html>
     padding: 1rem 2rem; padding-bottom: 4rem;
   }
 
-  /* ── Two-column grid on desktop ── */
+  /* ── Layout: controls | log | buffer ── */
   .dashboard-grid {
     display: grid;
     grid-template-columns: 1fr;
-    gap: 0;
+    gap: 1rem;
   }
-  @media (min-width: 780px) {
+  @media (min-width: 680px) {
     .dashboard-grid {
-      grid-template-columns: minmax(0,3fr) minmax(320px,1fr);
+      grid-template-columns: 2fr 1.5fr 1.5fr;
       gap: 1.25rem;
       align-items: start;
     }
-    .col-right {
+    .col-left {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .col-log {
+      grid-column: 2;
+      grid-row: 1;
       position: sticky;
       top: 1rem;
-      max-width: 480px;
     }
-    .log-body { height: 340px; }
-    .chunk-list-wrap { max-height: 220px; }
+    .col-buffer {
+      grid-column: 3;
+      grid-row: 1;
+      position: sticky;
+      top: 1rem;
+    }
+    .log-body { height: 420px; }
+    .chunk-list-wrap { max-height: 340px; }
   }
 
   /* Header */
@@ -665,10 +676,8 @@ MAIN_PAGE = """<!doctype html>
 
   </div><!-- /col-left -->
 
-  <!-- ══ RIGHT COLUMN — monitoring ══ -->
-  <div class="col-right">
-
-    <!-- ── Log Terminal ── -->
+  <!-- ══ LOG COLUMN ══ -->
+  <div class="col-log">
     <div class="terminal-card">
       <div class="terminal-header">
         <span class="terminal-title">⬛ radio.service log</span>
@@ -679,8 +688,10 @@ MAIN_PAGE = """<!doctype html>
       </div>
       <div class="log-body" id="logBody"></div>
     </div>
+  </div><!-- /col-log -->
 
-    <!-- ── Buffer Monitor ── -->
+  <!-- ══ BUFFER COLUMN ══ -->
+  <div class="col-buffer">
     <div class="card">
       <div class="card-title">📼 Buffer</div>
       <div class="buf-stats">
@@ -723,8 +734,7 @@ MAIN_PAGE = """<!doctype html>
       </div>
       <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
     </div>
-
-  </div><!-- /col-right -->
+  </div><!-- /col-buffer -->
 
 </div><!-- /dashboard-grid -->
 
