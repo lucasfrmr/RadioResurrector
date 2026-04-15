@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import subprocess
+import time
 
 from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
 
@@ -12,6 +13,7 @@ BASE_DIR = "/opt/radio"
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 CONFIG_SH = os.path.join(BASE_DIR, "config.sh")
 BUFFER_DIR = os.path.join(BASE_DIR, "buffer")
+STATE_FILE = os.path.join(BASE_DIR, "state.json")
 
 app = Flask(__name__)
 
@@ -65,11 +67,60 @@ def service_status():
         return "unknown"
 
 
-def buffer_chunk_count():
+def playback_state():
+    """Read the state.json written by radio.sh."""
     try:
-        return len([f for f in os.listdir(BUFFER_DIR) if f.endswith(".mp3")])
+        with open(STATE_FILE) as f:
+            return json.load(f)
     except Exception:
-        return 0
+        return {"mode": "unknown", "url": "", "since": 0}
+
+
+def buffer_info():
+    """Return stats and file list for the buffer directory."""
+    cfg = load_config()
+    chunk_seconds = cfg.get("chunk_seconds", 300)
+    max_chunks = cfg.get("buffer_minutes", 120) * 60 // chunk_seconds
+
+    try:
+        files = sorted(
+            [f for f in os.listdir(BUFFER_DIR) if f.endswith(".mp3")],
+        )
+    except Exception:
+        files = []
+
+    file_details = []
+    total_bytes = 0
+    oldest_ts = None
+    newest_ts = None
+
+    for name in files:
+        path = os.path.join(BUFFER_DIR, name)
+        try:
+            st = os.stat(path)
+            sz = st.st_size
+            mt = int(st.st_mtime)
+        except OSError:
+            continue
+        total_bytes += sz
+        if oldest_ts is None or mt < oldest_ts:
+            oldest_ts = mt
+        if newest_ts is None or mt > newest_ts:
+            newest_ts = mt
+        file_details.append({"name": name, "size": sz, "mtime": mt})
+
+    covers_seconds = len(file_details) * chunk_seconds
+
+    return {
+        "files": file_details,
+        "chunk_count": len(file_details),
+        "max_chunks": max_chunks,
+        "chunk_seconds": chunk_seconds,
+        "total_bytes": total_bytes,
+        "covers_seconds": covers_seconds,
+        "oldest_ts": oldest_ts or 0,
+        "newest_ts": newest_ts or 0,
+    }
 
 
 cfg_boot = load_config()
@@ -110,7 +161,7 @@ PIN_PAGE = """<!doctype html>
   .logo { font-size: 2.8rem; margin-bottom: .5rem; }
   h1 { font-size: 1.3rem; font-weight: 700; color: #a78bfa; margin-bottom: .25rem; }
   .sub { font-size: .85rem; color: #666; margin-bottom: 2rem; }
-  input[type=password], input[type=number] {
+  input[type=password] {
     background: #0f0f1a;
     border: 1px solid #2a2a4a;
     border-radius: 10px;
@@ -172,26 +223,27 @@ MAIN_PAGE = """<!doctype html>
     --accent: #7c3aed;
     --accent-light: #a78bfa;
     --text: #e0e0f0;
-    --muted: #888;
+    --muted: #666;
     --green: #34d399;
     --red: #f87171;
     --yellow: #fbbf24;
+    --orange: #fb923c;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     background: var(--bg);
     color: var(--text);
     font-family: system-ui, sans-serif;
     padding: 1rem;
-    padding-bottom: 4rem;
+    padding-bottom: 5rem;
+    max-width: 600px;
+    margin: 0 auto;
   }
 
-  /* Header */
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 1.5rem;
+    margin-bottom: 1.25rem;
   }
   .logo-group { display: flex; align-items: center; gap: .6rem; }
   .logo-group span:first-child { font-size: 1.6rem; }
@@ -201,37 +253,97 @@ MAIN_PAGE = """<!doctype html>
     border-radius: 8px; color: var(--muted);
     cursor: pointer; font-size: .8rem; padding: .4rem .8rem;
   }
-  .logout:hover { border-color: var(--muted); }
+  .logout:hover { border-color: var(--muted); color: var(--text); }
 
-  /* Status bar */
-  .status-bar {
+  /* ── Now Playing ── */
+  .now-playing {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1rem 1.25rem;
-    margin-bottom: 1.25rem;
+    border-radius: 14px;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .now-playing::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    opacity: .06;
+    pointer-events: none;
+    background: var(--np-color, transparent);
+  }
+  .np-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
+    margin-bottom: .9rem;
   }
-  .status-left { display: flex; align-items: center; gap: .6rem; }
+  .np-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    border-radius: 999px;
+    font-size: .75rem;
+    font-weight: 800;
+    letter-spacing: .08em;
+    padding: .3rem .75rem;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  .np-badge.live    { background: rgba(52,211,153,.15); color: var(--green);  border: 1px solid rgba(52,211,153,.3); }
+  .np-badge.buffer  { background: rgba(251,191,36,.12); color: var(--yellow); border: 1px solid rgba(251,191,36,.3); }
+  .np-badge.starting{ background: rgba(251,146,60,.12); color: var(--orange); border: 1px solid rgba(251,146,60,.3); }
+  .np-badge.unknown, .np-badge.stopped {
+    background: rgba(248,113,113,.12); color: var(--red); border: 1px solid rgba(248,113,113,.3);
+  }
+  .pulse {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  .np-badge.live .pulse { animation: pulse 1.8s ease-in-out infinite; }
+  .np-badge:not(.live) .pulse { animation: none; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: .4; transform: scale(.7); }
+  }
+  .np-duration {
+    font-size: .8rem;
+    color: var(--muted);
+    flex-shrink: 0;
+    margin-top: .15rem;
+  }
+  .np-url {
+    font-size: .82rem;
+    color: var(--muted);
+    word-break: break-all;
+    line-height: 1.5;
+    border-top: 1px solid var(--border);
+    padding-top: .75rem;
+  }
+  .np-url strong { color: var(--text); font-weight: 600; display: block; margin-bottom: .2rem; }
+
+  /* Service dot */
+  .svc-row {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
   .dot {
-    width: 10px; height: 10px;
+    width: 8px; height: 8px;
     border-radius: 50%;
     background: var(--muted);
     flex-shrink: 0;
   }
-  .dot.active { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .dot.failed, .dot.inactive { background: var(--red); }
+  .dot.active   { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .dot.inactive, .dot.failed { background: var(--red); }
   .dot.activating { background: var(--yellow); }
-  .status-label { font-size: .95rem; font-weight: 600; }
-  .status-meta { font-size: .8rem; color: var(--muted); }
-  .status-right { text-align: right; }
-  .chunk-count { font-size: 1.1rem; font-weight: 700; color: var(--accent-light); }
-  .chunk-label { font-size: .75rem; color: var(--muted); }
+  .svc-label { font-size: .78rem; color: var(--muted); }
 
-  /* Cards */
+  /* ── Buffer monitor ── */
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -248,7 +360,116 @@ MAIN_PAGE = """<!doctype html>
     margin-bottom: 1rem;
   }
 
-  /* Stream section */
+  .buf-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: .5rem;
+    margin-bottom: 1rem;
+  }
+  .buf-stat {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: .65rem .5rem;
+    text-align: center;
+  }
+  .buf-stat-val {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--accent-light);
+    display: block;
+  }
+  .buf-stat-lbl {
+    font-size: .7rem;
+    color: var(--muted);
+    display: block;
+    margin-top: .1rem;
+  }
+
+  /* Fill bar */
+  .fill-bar-wrap {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    height: 10px;
+    overflow: hidden;
+    margin-bottom: .4rem;
+  }
+  .fill-bar-inner {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-light));
+    transition: width .6s ease;
+    min-width: 4px;
+  }
+  .fill-bar-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: .72rem;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+
+  /* Chunk list */
+  .chunk-list-wrap {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 1rem;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .chunk-list {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .78rem;
+  }
+  .chunk-list thead th {
+    background: var(--bg);
+    color: var(--muted);
+    font-weight: 600;
+    padding: .45rem .75rem;
+    text-align: left;
+    position: sticky;
+    top: 0;
+    letter-spacing: .04em;
+    font-size: .7rem;
+    text-transform: uppercase;
+  }
+  .chunk-list tbody tr { border-top: 1px solid var(--border); }
+  .chunk-list tbody tr:hover { background: rgba(167,139,250,.05); }
+  .chunk-list td { padding: .4rem .75rem; color: var(--text); }
+  .chunk-list td.dim { color: var(--muted); }
+  .chunk-list td.right { text-align: right; }
+
+  /* Buttons */
+  .btn {
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: .9rem;
+    font-weight: 600;
+    padding: .7rem 1.2rem;
+    transition: opacity .2s, background .2s;
+  }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #6d28d9; }
+  .btn-danger { background: #7f1d1d; color: #fca5a5; }
+  .btn-danger:hover:not(:disabled) { background: #991b1b; }
+  .btn-success { background: #064e3b; color: #6ee7b7; }
+  .btn-success:hover:not(:disabled) { background: #065f46; }
+  .btn-sm { font-size: .8rem; padding: .4rem .9rem; border-radius: 8px; }
+  .btn-ghost {
+    background: none; border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--accent-light); color: var(--text); }
+  .btn-row { display: flex; gap: .6rem; flex-wrap: wrap; }
+  .btn-row .btn { flex: 1; }
+
+  /* Stream */
   .stream-row { display: flex; gap: .6rem; margin-bottom: .75rem; }
   .stream-row select, .stream-row input {
     background: var(--bg);
@@ -275,128 +496,79 @@ MAIN_PAGE = """<!doctype html>
   }
   .slider-label { font-size: .9rem; }
   .slider-value {
-    font-size: .9rem;
-    font-weight: 700;
-    color: var(--accent-light);
-    min-width: 4rem;
-    text-align: right;
+    font-size: .9rem; font-weight: 700;
+    color: var(--accent-light); min-width: 4rem; text-align: right;
   }
   input[type=range] {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 100%;
-    height: 6px;
-    background: var(--border);
-    border-radius: 3px;
-    outline: none;
-    cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 6px;
+    background: var(--border); border-radius: 3px;
+    outline: none; cursor: pointer;
   }
   input[type=range]::-webkit-slider-thumb {
     -webkit-appearance: none;
     width: 20px; height: 20px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    transition: background .15s;
+    border-radius: 50%; background: var(--accent);
+    cursor: pointer; transition: background .15s;
   }
   input[type=range]::-webkit-slider-thumb:hover { background: var(--accent-light); }
 
-  /* Volume */
-  .volume-icon { font-size: 1.2rem; margin-right: .4rem; }
-
-  /* Buttons */
-  .btn {
-    border: none;
-    border-radius: 10px;
-    cursor: pointer;
-    font-size: .9rem;
-    font-weight: 600;
-    padding: .7rem 1.2rem;
-    transition: opacity .2s, background .2s;
-  }
-  .btn:disabled { opacity: .4; cursor: not-allowed; }
-  .btn-primary { background: var(--accent); color: #fff; }
-  .btn-primary:hover:not(:disabled) { background: #6d28d9; }
-  .btn-danger { background: #7f1d1d; color: #fca5a5; }
-  .btn-danger:hover:not(:disabled) { background: #991b1b; }
-  .btn-success { background: #064e3b; color: #6ee7b7; }
-  .btn-success:hover:not(:disabled) { background: #065f46; }
-  .btn-sm { font-size: .8rem; padding: .4rem .8rem; }
-  .btn-ghost {
-    background: none; border: 1px solid var(--border);
-    color: var(--muted);
-  }
-  .btn-ghost:hover:not(:disabled) { border-color: var(--accent-light); color: var(--text); }
-  .btn-row {
-    display: flex;
-    gap: .6rem;
-    flex-wrap: wrap;
-  }
-  .btn-row .btn { flex: 1; }
-
-  /* Preset management */
+  /* Presets */
   .preset-list { list-style: none; }
   .preset-item {
-    display: flex;
-    align-items: center;
-    gap: .6rem;
-    padding: .5rem 0;
-    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: .6rem;
+    padding: .5rem 0; border-bottom: 1px solid var(--border);
   }
   .preset-item:last-child { border-bottom: none; }
   .preset-name { flex: 0 0 120px; font-size: .85rem; font-weight: 600; }
   .preset-url { flex: 1; font-size: .75rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .add-preset-row { display: flex; gap: .5rem; margin-top: .75rem; flex-wrap: wrap; }
   .add-preset-row input {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: .85rem;
-    padding: .45rem .7rem;
-    outline: none;
-    flex: 1;
-    min-width: 80px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font-size: .85rem;
+    padding: .45rem .7rem; outline: none; flex: 1; min-width: 80px;
   }
   .add-preset-row input:focus { border-color: var(--accent-light); }
 
-  /* PIN change */
+  /* PIN */
   .pin-row { display: flex; gap: .6rem; }
   .pin-row input {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: 1rem;
-    letter-spacing: .2rem;
-    padding: .55rem .75rem;
-    text-align: center;
-    width: 100px;
-    outline: none;
-    flex-shrink: 0;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font-size: 1rem;
+    letter-spacing: .2rem; padding: .55rem .75rem;
+    text-align: center; width: 100px; outline: none; flex-shrink: 0;
   }
   .pin-row input:focus { border-color: var(--accent-light); }
 
   /* Toast */
   #toast {
-    position: fixed;
-    bottom: 1.5rem;
-    left: 50%;
+    position: fixed; bottom: 1.5rem; left: 50%;
     transform: translateX(-50%);
-    background: #1e1b4b;
-    border: 1px solid var(--accent);
-    border-radius: 10px;
-    color: var(--text);
-    font-size: .9rem;
-    padding: .7rem 1.5rem;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity .3s;
-    white-space: nowrap;
-    z-index: 100;
+    background: #1e1b4b; border: 1px solid var(--accent);
+    border-radius: 10px; color: var(--text);
+    font-size: .9rem; padding: .7rem 1.5rem;
+    opacity: 0; pointer-events: none; transition: opacity .3s;
+    white-space: nowrap; z-index: 100;
   }
   #toast.show { opacity: 1; }
   #toast.error { border-color: var(--red); background: #2d1515; }
+
+  /* Confirm dialog */
+  .overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,.7); z-index: 200;
+    align-items: center; justify-content: center;
+  }
+  .overlay.open { display: flex; }
+  .dialog {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 1.75rem 1.5rem;
+    max-width: 320px; width: 90%; text-align: center;
+  }
+  .dialog h2 { font-size: 1rem; margin-bottom: .5rem; }
+  .dialog p { font-size: .85rem; color: var(--muted); margin-bottom: 1.25rem; }
+  .dialog .btn-row { justify-content: center; }
+  .dialog .btn { flex: 0 1 auto; min-width: 100px; }
 </style>
 </head>
 <body>
@@ -411,24 +583,80 @@ MAIN_PAGE = """<!doctype html>
   </form>
 </header>
 
-<!-- Status -->
-<div class="status-bar" id="statusBar">
-  <div class="status-left">
-    <div class="dot {{ 'active' if status == 'active' else status }}" id="statusDot"></div>
-    <div>
-      <div class="status-label" id="statusLabel">
-        {{ 'Running' if status == 'active' else status.title() }}
-      </div>
-      <div class="status-meta">radio.service</div>
-    </div>
+<!-- ── Now Playing ── -->
+<div class="now-playing" id="nowPlaying">
+  <div class="np-header">
+    <span class="np-badge {{ state.mode }}" id="npBadge">
+      <span class="pulse"></span>
+      <span id="npMode">{{ state.mode | upper }}</span>
+    </span>
+    <span class="np-duration" id="npDuration">—</span>
   </div>
-  <div class="status-right">
-    <div class="chunk-count" id="chunkCount">{{ chunks }}</div>
-    <div class="chunk-label">buffer chunks</div>
+  <div class="svc-row" style="margin-bottom:.75rem">
+    <div class="dot {{ svc_status }}" id="svcDot"></div>
+    <span class="svc-label" id="svcLabel">radio.service — {{ svc_status }}</span>
+  </div>
+  <div class="np-url">
+    <strong>Stream</strong>
+    <span id="npUrl">{{ state.url or '—' }}</span>
   </div>
 </div>
 
-<!-- Volume -->
+<!-- ── Buffer Monitor ── -->
+<div class="card">
+  <div class="card-title">📼 Buffer</div>
+
+  <div class="buf-stats">
+    <div class="buf-stat">
+      <span class="buf-stat-val" id="bChunks">{{ buf.chunk_count }}</span>
+      <span class="buf-stat-lbl">chunks</span>
+    </div>
+    <div class="buf-stat">
+      <span class="buf-stat-val" id="bCovers">{{ (buf.covers_seconds // 60) }}m</span>
+      <span class="buf-stat-lbl">covered</span>
+    </div>
+    <div class="buf-stat">
+      <span class="buf-stat-val" id="bSize">{{ '%.1f' % (buf.total_bytes / 1048576) }}MB</span>
+      <span class="buf-stat-lbl">on disk</span>
+    </div>
+  </div>
+
+  <div class="fill-bar-wrap">
+    <div class="fill-bar-inner" id="fillBar"
+         style="width:{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%"></div>
+  </div>
+  <div class="fill-bar-label">
+    <span id="fillLabel">{{ buf.chunk_count }} / {{ buf.max_chunks }} chunks</span>
+    <span id="fillPct">{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%</span>
+  </div>
+
+  <div class="chunk-list-wrap">
+    <table class="chunk-list">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Size</th>
+          <th>Age</th>
+        </tr>
+      </thead>
+      <tbody id="chunkTable">
+        {% for f in buf.files | reverse %}
+        <tr>
+          <td>{{ f.name }}</td>
+          <td class="dim">{{ '%.1f' % (f.size / 1048576) }} MB</td>
+          <td class="dim right" data-ts="{{ f.mtime }}">—</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
+</div>
+
+<!-- ── Volume ── -->
 <div class="card">
   <div class="card-title">🔊 Volume</div>
   <div class="slider-row">
@@ -441,7 +669,7 @@ MAIN_PAGE = """<!doctype html>
   </div>
 </div>
 
-<!-- Stream -->
+<!-- ── Stream ── -->
 <div class="card">
   <div class="card-title">📡 Stream</div>
   <div class="stream-row">
@@ -456,7 +684,7 @@ MAIN_PAGE = """<!doctype html>
   </div>
 </div>
 
-<!-- Recording Settings -->
+<!-- ── Recording Settings ── -->
 <div class="card">
   <div class="card-title">⏺ Recording Settings</div>
   <div class="slider-row">
@@ -488,7 +716,7 @@ MAIN_PAGE = """<!doctype html>
   </div>
 </div>
 
-<!-- Apply -->
+<!-- ── Apply ── -->
 <div class="card">
   <div class="card-title">Apply Changes</div>
   <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">
@@ -499,7 +727,7 @@ MAIN_PAGE = """<!doctype html>
   </button>
 </div>
 
-<!-- Service Controls -->
+<!-- ── Service Controls ── -->
 <div class="card">
   <div class="card-title">⚙ Service</div>
   <div class="btn-row">
@@ -509,7 +737,7 @@ MAIN_PAGE = """<!doctype html>
   </div>
 </div>
 
-<!-- Stream Presets -->
+<!-- ── Stream Presets ── -->
 <div class="card">
   <div class="card-title">📋 Stream Presets</div>
   <ul class="preset-list" id="presetList">
@@ -529,7 +757,7 @@ MAIN_PAGE = """<!doctype html>
   </div>
 </div>
 
-<!-- Change PIN -->
+<!-- ── Change PIN ── -->
 <div class="card">
   <div class="card-title">🔒 Change PIN</div>
   <div class="pin-row">
@@ -539,10 +767,22 @@ MAIN_PAGE = """<!doctype html>
   </div>
 </div>
 
+<!-- Clear Buffer confirmation -->
+<div class="overlay" id="clearOverlay">
+  <div class="dialog">
+    <h2>Clear buffer?</h2>
+    <p>This deletes all cached audio files. If the live stream is down, playback will stop until new chunks are recorded.</p>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="closeClear()">Cancel</button>
+      <button class="btn btn-danger" onclick="doClear()">Clear</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
-// ---- Toast ----
+// ── Toast ──
 function toast(msg, isError=false) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -551,14 +791,52 @@ function toast(msg, isError=false) {
   window._toastTimer = setTimeout(() => t.className = '', 2500);
 }
 
-// ---- Preset select ----
+// ── Relative time ──
+function relTime(ts) {
+  const s = Math.floor(Date.now() / 1000) - ts;
+  if (s < 60)  return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+
+function durSince(ts) {
+  if (!ts) return '—';
+  const s = Math.floor(Date.now() / 1000) - ts;
+  if (s < 0) return '—';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+
+function fmtMB(bytes) {
+  return (bytes/1048576).toFixed(1) + 'MB';
+}
+
+// ── Age cells ──
+function refreshAgeCells() {
+  document.querySelectorAll('[data-ts]').forEach(td => {
+    td.textContent = relTime(parseInt(td.dataset.ts));
+  });
+}
+setInterval(refreshAgeCells, 10000);
+refreshAgeCells();
+
+// ── Now Playing duration ticker ──
+let npSince = {{ state.since or 0 }};
+function tickDuration() {
+  document.getElementById('npDuration').textContent = durSince(npSince);
+}
+setInterval(tickDuration, 1000);
+tickDuration();
+
+// ── Preset select ──
 function applyPreset() {
   const sel = document.getElementById('presetSelect');
   if (sel.value) document.getElementById('streamUrl').value = sel.value;
   sel.value = '';
 }
 
-// ---- Volume (live update) ----
+// ── Volume (debounced live update) ──
 const volSlider = document.getElementById('volumeSlider');
 const volDisplay = document.getElementById('volDisplay');
 let volTimer;
@@ -567,19 +845,19 @@ volSlider.addEventListener('input', () => {
   clearTimeout(volTimer);
   volTimer = setTimeout(() => {
     api('/volume', { volume: parseInt(volSlider.value) })
-      .then(() => toast('Volume set to ' + volSlider.value + '%'))
+      .then(() => toast('Volume → ' + volSlider.value + '%'))
       .catch(() => toast('Volume update failed', true));
   }, 400);
 });
 
-// ---- Apply all settings ----
+// ── Apply settings ──
 function applySettings() {
   const payload = {
-    stream_url: document.getElementById('streamUrl').value.trim(),
-    chunk_seconds: parseInt(document.getElementById('chunkSlider').value),
+    stream_url:     document.getElementById('streamUrl').value.trim(),
+    chunk_seconds:  parseInt(document.getElementById('chunkSlider').value),
     buffer_minutes: parseInt(document.getElementById('bufferSlider').value),
     check_interval: parseInt(document.getElementById('intervalSlider').value),
-    volume: parseInt(volSlider.value),
+    volume:         parseInt(volSlider.value),
   };
   if (!payload.stream_url) return toast('Stream URL is required', true);
   api('/apply', payload)
@@ -587,44 +865,90 @@ function applySettings() {
     .catch(() => toast('Failed to apply settings', true));
 }
 
-// ---- Service actions ----
+// ── Service actions ──
 function serviceAction(action) {
   api('/service/' + action, {})
-    .then(d => {
-      toast('Service ' + action + 'ed');
-      updateStatus(d.status);
-    })
+    .then(d => { toast('Service ' + action + 'ed'); updateSvc(d.status); })
     .catch(() => toast('Service action failed', true));
 }
 
-// ---- Status polling ----
-function updateStatus(status) {
-  const dot = document.getElementById('statusDot');
-  const label = document.getElementById('statusLabel');
-  dot.className = 'dot ' + status;
-  label.textContent = status === 'active' ? 'Running' : (status.charAt(0).toUpperCase() + status.slice(1));
+// ── Update Now Playing UI ──
+function updateNP(state) {
+  const badge = document.getElementById('npBadge');
+  const modeEl = document.getElementById('npMode');
+  const urlEl  = document.getElementById('npUrl');
+  badge.className = 'np-badge ' + state.mode;
+  modeEl.textContent = state.mode.toUpperCase();
+  urlEl.textContent  = state.url || '—';
+  npSince = state.since || 0;
 }
 
-setInterval(() => {
+function updateSvc(status) {
+  const dot   = document.getElementById('svcDot');
+  const label = document.getElementById('svcLabel');
+  dot.className  = 'dot ' + status;
+  label.textContent = 'radio.service — ' + status;
+}
+
+// ── Update buffer UI ──
+function updateBuffer(buf) {
+  document.getElementById('bChunks').textContent  = buf.chunk_count;
+  document.getElementById('bCovers').textContent  = Math.floor(buf.covers_seconds / 60) + 'm';
+  document.getElementById('bSize').textContent    = fmtMB(buf.total_bytes);
+
+  const pct = buf.max_chunks ? Math.min(100, Math.round(buf.chunk_count * 100 / buf.max_chunks)) : 0;
+  document.getElementById('fillBar').style.width  = pct + '%';
+  document.getElementById('fillLabel').textContent = buf.chunk_count + ' / ' + buf.max_chunks + ' chunks';
+  document.getElementById('fillPct').textContent   = pct + '%';
+
+  // Rebuild chunk table
+  const tbody = document.getElementById('chunkTable');
+  if (!buf.files.length) {
+    tbody.innerHTML = '<tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>';
+    return;
+  }
+  tbody.innerHTML = [...buf.files].reverse().map(f =>
+    `<tr>
+      <td>${esc(f.name)}</td>
+      <td class="dim">${(f.size/1048576).toFixed(1)} MB</td>
+      <td class="dim right" data-ts="${f.mtime}">${relTime(f.mtime)}</td>
+    </tr>`
+  ).join('');
+}
+
+// ── Poll status + buffer every 8 s ──
+function poll() {
   fetch('/status')
     .then(r => r.json())
     .then(d => {
-      updateStatus(d.status);
-      document.getElementById('chunkCount').textContent = d.buffer_chunks;
+      updateNP(d.state);
+      updateSvc(d.svc_status);
+      updateBuffer(d.buffer);
     })
     .catch(() => {});
-}, 8000);
+}
+setInterval(poll, 8000);
 
-// ---- Presets ----
+// ── Clear buffer ──
+function confirmClear() { document.getElementById('clearOverlay').classList.add('open'); }
+function closeClear()   { document.getElementById('clearOverlay').classList.remove('open'); }
+function doClear() {
+  closeClear();
+  api('/buffer/clear', {})
+    .then(d => { toast('Buffer cleared'); updateBuffer(d.buffer); })
+    .catch(() => toast('Failed to clear buffer', true));
+}
+
+// ── Presets ──
 function addPreset() {
   const name = document.getElementById('newPresetName').value.trim();
-  const url = document.getElementById('newPresetUrl').value.trim();
+  const url  = document.getElementById('newPresetUrl').value.trim();
   if (!name || !url) return toast('Name and URL are required', true);
   api('/presets/add', { name, url })
     .then(() => {
       toast('Preset added');
       document.getElementById('newPresetName').value = '';
-      document.getElementById('newPresetUrl').value = '';
+      document.getElementById('newPresetUrl').value  = '';
       addPresetToDOM(name, url);
       addPresetToSelect(name, url);
     })
@@ -645,47 +969,41 @@ function removePreset(url) {
 
 function addPresetToDOM(name, url) {
   const li = document.createElement('li');
-  li.className = 'preset-item';
-  li.dataset.url = url;
+  li.className = 'preset-item'; li.dataset.url = url;
   li.innerHTML = `<span class="preset-name">${esc(name)}</span>
     <span class="preset-url">${esc(url)}</span>
     <button class="btn btn-sm btn-danger" onclick="removePreset('${esc(url)}')">✕</button>`;
   document.getElementById('presetList').appendChild(li);
 }
-
 function addPresetToSelect(name, url) {
   const opt = document.createElement('option');
-  opt.value = url;
-  opt.textContent = name;
+  opt.value = url; opt.textContent = name;
   document.getElementById('presetSelect').appendChild(opt);
 }
 
-function esc(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-// ---- PIN change ----
+// ── PIN ──
 function changePin() {
   const pin = document.getElementById('newPin').value.trim();
   if (!/^\d{4,8}$/.test(pin)) return toast('PIN must be 4–8 digits', true);
   api('/pin', { pin })
-    .then(() => {
-      toast('PIN updated');
-      document.getElementById('newPin').value = '';
-    })
+    .then(() => { toast('PIN updated'); document.getElementById('newPin').value = ''; })
     .catch(() => toast('Failed to update PIN', true));
 }
 
-// ---- API helper ----
+// ── Escape helper ──
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── API helper ──
 function api(path, body) {
   return fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then(r => {
-    if (!r.ok) throw new Error(r.status);
-    return r.json();
-  });
+  }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 }
 </script>
 </body>
@@ -721,8 +1039,9 @@ def dashboard():
     return render_template_string(
         MAIN_PAGE,
         cfg=cfg,
-        status=service_status(),
-        chunks=buffer_chunk_count(),
+        state=playback_state(),
+        svc_status=service_status(),
+        buf=buffer_info(),
     )
 
 
@@ -732,17 +1051,28 @@ def logout():
     return redirect(url_for("index"))
 
 
+@app.route("/status")
+def get_status():
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify({
+        "svc_status": service_status(),
+        "state": playback_state(),
+        "buffer": buffer_info(),
+    })
+
+
 @app.route("/apply", methods=["POST"])
 def apply():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
     data = request.get_json(force=True)
     cfg = load_config()
-    cfg["stream_url"] = str(data.get("stream_url", cfg["stream_url"]))
-    cfg["chunk_seconds"] = max(60, min(600, int(data.get("chunk_seconds", cfg["chunk_seconds"]))))
+    cfg["stream_url"]     = str(data.get("stream_url", cfg["stream_url"]))
+    cfg["chunk_seconds"]  = max(60, min(600, int(data.get("chunk_seconds", cfg["chunk_seconds"]))))
     cfg["buffer_minutes"] = max(30, min(360, int(data.get("buffer_minutes", cfg["buffer_minutes"]))))
     cfg["check_interval"] = max(5, min(60, int(data.get("check_interval", cfg["check_interval"]))))
-    cfg["volume"] = max(0, min(100, int(data.get("volume", cfg["volume"]))))
+    cfg["volume"]         = max(0, min(100, int(data.get("volume", cfg["volume"]))))
     save_config(cfg)
     subprocess.run(["systemctl", "restart", "radio.service"], timeout=10)
     return jsonify({"ok": True})
@@ -770,11 +1100,17 @@ def service_action(action):
     return jsonify({"ok": True, "status": service_status()})
 
 
-@app.route("/status")
-def get_status():
+@app.route("/buffer/clear", methods=["POST"])
+def clear_buffer():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
-    return jsonify({"status": service_status(), "buffer_chunks": buffer_chunk_count()})
+    try:
+        for name in os.listdir(BUFFER_DIR):
+            if name.endswith(".mp3") or name.endswith(".m3u"):
+                os.remove(os.path.join(BUFFER_DIR, name))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, "buffer": buffer_info()})
 
 
 @app.route("/presets/add", methods=["POST"])
@@ -783,7 +1119,7 @@ def add_preset():
         return jsonify({"error": "unauthorized"}), 401
     data = request.get_json(force=True)
     name = str(data.get("name", "")).strip()[:64]
-    url = str(data.get("url", "")).strip()[:512]
+    url  = str(data.get("url",  "")).strip()[:512]
     if not name or not url:
         return jsonify({"error": "name and url required"}), 400
     cfg = load_config()

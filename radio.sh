@@ -17,6 +17,7 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 VOLUME="${VOLUME:-90}"
 
 BUFFER_DIR="/opt/radio/buffer"
+STATE_FILE="/opt/radio/state.json"
 MAX_CHUNKS=$(( BUFFER_MINUTES * 60 / CHUNK_SECONDS ))
 PLAYER="mpv --no-video --quiet --volume=${VOLUME} --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
 
@@ -24,6 +25,13 @@ mkdir -p "$BUFFER_DIR"
 
 amixer cset numid=3 1 >/dev/null 2>&1
 amixer sset 'PCM' "${VOLUME}%" >/dev/null 2>&1
+
+# -------- State file --------
+write_state() {
+  local mode="$1"
+  printf '{"mode":"%s","url":"%s","since":%s}\n' \
+    "$mode" "$STREAM_URL" "$(date +%s)" > "$STATE_FILE"
+}
 
 prune_buffer() {
   ls -1t "$BUFFER_DIR"/*.mp3 2>/dev/null | tail -n +$((MAX_CHUNKS+1)) | xargs -r rm -f
@@ -68,6 +76,7 @@ start_watcher() {
 # -------- Buffer playback --------
 play_buffer() {
   echo "[radio] Playing backup buffer..."
+  write_state "buffer"
   ls -1tr "$BUFFER_DIR"/*.mp3 > "$BUFFER_DIR/loop.m3u" 2>/dev/null
   mpv --no-video --quiet --volume="${VOLUME}" --loop-playlist=inf --audio-device=alsa "$BUFFER_DIR/loop.m3u" &
   MPV_PID=$!
@@ -77,6 +86,7 @@ play_buffer() {
 }
 
 # -------- Main loop --------
+write_state "starting"
 record_stream &
 REC_PID=$!
 echo "[radio] Recorder PID: $REC_PID"
@@ -86,6 +96,7 @@ while true; do
 
   if stream_ok; then
     echo "[radio] Stream OK — playing live."
+    write_state "live"
     $PLAYER "$STREAM_URL"
     echo "[radio] mpv exited; rechecking..."
   else
