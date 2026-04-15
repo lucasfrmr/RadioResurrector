@@ -5,15 +5,16 @@ import json
 import os
 import secrets
 import subprocess
-import time
+from urllib.parse import urlparse
 
-from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
 
-BASE_DIR = "/opt/radio"
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-CONFIG_SH = os.path.join(BASE_DIR, "config.sh")
-BUFFER_DIR = os.path.join(BASE_DIR, "buffer")
-STATE_FILE = os.path.join(BASE_DIR, "state.json")
+BASE_DIR         = "/opt/radio"
+CONFIG_FILE      = os.path.join(BASE_DIR, "config.json")
+CONFIG_SH        = os.path.join(BASE_DIR, "config.sh")
+BUFFER_DIR       = os.path.join(BASE_DIR, "buffer")
+STATE_FILE       = os.path.join(BASE_DIR, "state.json")
+FORCE_BUFFER     = os.path.join(BASE_DIR, "force_buffer")
 
 app = Flask(__name__)
 
@@ -30,6 +31,10 @@ DEFAULT_CONFIG = {
     ],
 }
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -68,58 +73,69 @@ def service_status():
 
 
 def playback_state():
-    """Read the state.json written by radio.sh."""
+    """Read state.json written by radio.sh and enrich with stream name."""
     try:
         with open(STATE_FILE) as f:
-            return json.load(f)
+            state = json.load(f)
     except Exception:
-        return {"mode": "unknown", "url": "", "since": 0}
+        state = {"mode": "unknown", "url": "", "since": 0}
+
+    url = state.get("url", "")
+    cfg = load_config()
+
+    # Resolve stream name from presets
+    name = None
+    for s in cfg.get("streams", []):
+        if s["url"] == url:
+            name = s["name"]
+            break
+    if name is None:
+        try:
+            name = urlparse(url).hostname or url
+        except Exception:
+            name = url
+
+    state["name"] = name
+    state["forced"] = os.path.exists(FORCE_BUFFER)
+    return state
 
 
 def buffer_info():
-    """Return stats and file list for the buffer directory."""
     cfg = load_config()
     chunk_seconds = cfg.get("chunk_seconds", 300)
-    max_chunks = cfg.get("buffer_minutes", 120) * 60 // chunk_seconds
+    max_chunks    = cfg.get("buffer_minutes", 120) * 60 // chunk_seconds
 
     try:
-        files = sorted(
-            [f for f in os.listdir(BUFFER_DIR) if f.endswith(".mp3")],
-        )
+        files = sorted(f for f in os.listdir(BUFFER_DIR) if f.endswith(".mp3"))
     except Exception:
         files = []
 
     file_details = []
-    total_bytes = 0
-    oldest_ts = None
-    newest_ts = None
+    total_bytes  = 0
+    oldest_ts    = None
+    newest_ts    = None
 
     for name in files:
         path = os.path.join(BUFFER_DIR, name)
         try:
             st = os.stat(path)
-            sz = st.st_size
-            mt = int(st.st_mtime)
+            sz, mt = st.st_size, int(st.st_mtime)
         except OSError:
             continue
         total_bytes += sz
-        if oldest_ts is None or mt < oldest_ts:
-            oldest_ts = mt
-        if newest_ts is None or mt > newest_ts:
-            newest_ts = mt
+        oldest_ts = mt if oldest_ts is None else min(oldest_ts, mt)
+        newest_ts = mt if newest_ts is None else max(newest_ts, mt)
         file_details.append({"name": name, "size": sz, "mtime": mt})
 
-    covers_seconds = len(file_details) * chunk_seconds
-
     return {
-        "files": file_details,
-        "chunk_count": len(file_details),
-        "max_chunks": max_chunks,
-        "chunk_seconds": chunk_seconds,
-        "total_bytes": total_bytes,
-        "covers_seconds": covers_seconds,
-        "oldest_ts": oldest_ts or 0,
-        "newest_ts": newest_ts or 0,
+        "files":          file_details,
+        "chunk_count":    len(file_details),
+        "max_chunks":     max_chunks,
+        "chunk_seconds":  chunk_seconds,
+        "total_bytes":    total_bytes,
+        "covers_seconds": len(file_details) * chunk_seconds,
+        "oldest_ts":      oldest_ts or 0,
+        "newest_ts":      newest_ts or 0,
     }
 
 
@@ -140,53 +156,31 @@ PIN_PAGE = """<!doctype html>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    background: #0f0f1a;
-    color: #e0e0f0;
+    background: #0f0f1a; color: #e0e0f0;
     font-family: system-ui, sans-serif;
-    min-height: 100dvh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    min-height: 100dvh; display: flex;
+    align-items: center; justify-content: center;
   }
   .card {
-    background: #1a1a2e;
-    border: 1px solid #2a2a4a;
-    border-radius: 16px;
-    padding: 2.5rem 2rem;
-    width: 100%;
-    max-width: 360px;
-    text-align: center;
+    background: #1a1a2e; border: 1px solid #2a2a4a;
+    border-radius: 16px; padding: 2.5rem 2rem;
+    width: 100%; max-width: 360px; text-align: center;
     box-shadow: 0 8px 32px rgba(0,0,0,.5);
   }
   .logo { font-size: 2.8rem; margin-bottom: .5rem; }
   h1 { font-size: 1.3rem; font-weight: 700; color: #a78bfa; margin-bottom: .25rem; }
   .sub { font-size: .85rem; color: #666; margin-bottom: 2rem; }
   input[type=password] {
-    background: #0f0f1a;
-    border: 1px solid #2a2a4a;
-    border-radius: 10px;
-    color: #e0e0f0;
-    font-size: 1.6rem;
-    letter-spacing: .5rem;
-    padding: .75rem 1rem;
-    text-align: center;
-    width: 100%;
-    margin-bottom: 1.25rem;
-    outline: none;
-    transition: border-color .2s;
+    background: #0f0f1a; border: 1px solid #2a2a4a; border-radius: 10px;
+    color: #e0e0f0; font-size: 1.6rem; letter-spacing: .5rem;
+    padding: .75rem 1rem; text-align: center; width: 100%;
+    margin-bottom: 1.25rem; outline: none; transition: border-color .2s;
   }
   input:focus { border-color: #a78bfa; }
   button {
-    background: #7c3aed;
-    border: none;
-    border-radius: 10px;
-    color: #fff;
-    cursor: pointer;
-    font-size: 1rem;
-    font-weight: 600;
-    padding: .8rem 2rem;
-    width: 100%;
-    transition: background .2s;
+    background: #7c3aed; border: none; border-radius: 10px;
+    color: #fff; cursor: pointer; font-size: 1rem; font-weight: 600;
+    padding: .8rem 2rem; width: 100%; transition: background .2s;
   }
   button:hover { background: #6d28d9; }
   .error { color: #f87171; font-size: .9rem; margin-bottom: 1rem; }
@@ -217,240 +211,209 @@ MAIN_PAGE = """<!doctype html>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #0f0f1a;
-    --card: #1a1a2e;
-    --border: #2a2a4a;
-    --accent: #7c3aed;
-    --accent-light: #a78bfa;
-    --text: #e0e0f0;
-    --muted: #666;
-    --green: #34d399;
-    --red: #f87171;
-    --yellow: #fbbf24;
-    --orange: #fb923c;
+    --bg: #0f0f1a; --card: #1a1a2e; --border: #2a2a4a;
+    --accent: #7c3aed; --accent-light: #a78bfa; --text: #e0e0f0;
+    --muted: #666; --green: #34d399; --red: #f87171;
+    --yellow: #fbbf24; --orange: #fb923c;
   }
   body {
-    background: var(--bg);
-    color: var(--text);
+    background: var(--bg); color: var(--text);
     font-family: system-ui, sans-serif;
-    padding: 1rem;
-    padding-bottom: 5rem;
-    max-width: 600px;
-    margin: 0 auto;
+    padding: 1rem; padding-bottom: 5rem;
+    max-width: 640px; margin: 0 auto;
   }
 
+  /* Header */
   header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 1.25rem;
+    display: flex; align-items: center;
+    justify-content: space-between; margin-bottom: 1.25rem;
   }
   .logo-group { display: flex; align-items: center; gap: .6rem; }
   .logo-group span:first-child { font-size: 1.6rem; }
   .logo-group h1 { font-size: 1.1rem; color: var(--accent-light); font-weight: 700; }
   .logout {
-    background: none; border: 1px solid var(--border);
-    border-radius: 8px; color: var(--muted);
-    cursor: pointer; font-size: .8rem; padding: .4rem .8rem;
+    background: none; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--muted); cursor: pointer; font-size: .8rem; padding: .4rem .8rem;
   }
   .logout:hover { border-color: var(--muted); color: var(--text); }
 
   /* ── Now Playing ── */
   .now-playing {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 1.25rem;
-    margin-bottom: 1rem;
-    position: relative;
-    overflow: hidden;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 1.25rem; margin-bottom: 1rem;
   }
-  .now-playing::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    opacity: .06;
-    pointer-events: none;
-    background: var(--np-color, transparent);
-  }
-  .np-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: .9rem;
+  .np-top {
+    display: flex; align-items: center;
+    justify-content: space-between; gap: .75rem; margin-bottom: 1rem;
   }
   .np-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: .4rem;
-    border-radius: 999px;
-    font-size: .75rem;
-    font-weight: 800;
-    letter-spacing: .08em;
-    padding: .3rem .75rem;
-    text-transform: uppercase;
-    flex-shrink: 0;
+    display: inline-flex; align-items: center; gap: .4rem;
+    border-radius: 999px; font-size: .72rem; font-weight: 800;
+    letter-spacing: .08em; padding: .28rem .7rem; text-transform: uppercase; flex-shrink: 0;
   }
   .np-badge.live    { background: rgba(52,211,153,.15); color: var(--green);  border: 1px solid rgba(52,211,153,.3); }
   .np-badge.buffer  { background: rgba(251,191,36,.12); color: var(--yellow); border: 1px solid rgba(251,191,36,.3); }
+  .np-badge.forced  { background: rgba(251,191,36,.12); color: var(--yellow); border: 1px solid rgba(251,191,36,.3); }
   .np-badge.starting{ background: rgba(251,146,60,.12); color: var(--orange); border: 1px solid rgba(251,146,60,.3); }
   .np-badge.unknown, .np-badge.stopped {
     background: rgba(248,113,113,.12); color: var(--red); border: 1px solid rgba(248,113,113,.3);
   }
   .pulse {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: currentColor;
-    animation: pulse 1.8s ease-in-out infinite;
+    width: 7px; height: 7px; border-radius: 50%; background: currentColor;
   }
   .np-badge.live .pulse { animation: pulse 1.8s ease-in-out infinite; }
-  .np-badge:not(.live) .pulse { animation: none; }
   @keyframes pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50%       { opacity: .4; transform: scale(.7); }
+    0%,100% { opacity:1; transform:scale(1); }
+    50%      { opacity:.35; transform:scale(.65); }
   }
-  .np-duration {
-    font-size: .8rem;
-    color: var(--muted);
-    flex-shrink: 0;
-    margin-top: .15rem;
-  }
-  .np-url {
-    font-size: .82rem;
-    color: var(--muted);
-    word-break: break-all;
-    line-height: 1.5;
-    border-top: 1px solid var(--border);
-    padding-top: .75rem;
-  }
-  .np-url strong { color: var(--text); font-weight: 600; display: block; margin-bottom: .2rem; }
+  .np-duration { font-size: .78rem; color: var(--muted); flex-shrink: 0; }
 
-  /* Service dot */
-  .svc-row {
-    display: flex;
-    align-items: center;
-    gap: .5rem;
+  /* Big title line */
+  .np-title {
+    font-size: 1.25rem; font-weight: 700; margin-bottom: .3rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .np-subtitle {
+    font-size: .78rem; color: var(--muted);
+    word-break: break-all; line-height: 1.5; margin-bottom: 1rem;
+  }
+
+  /* Svc row */
+  .svc-row { display: flex; align-items: center; gap: .45rem; margin-bottom: 1rem; }
   .dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--muted);
-    flex-shrink: 0;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0;
   }
   .dot.active   { background: var(--green); box-shadow: 0 0 5px var(--green); }
   .dot.inactive, .dot.failed { background: var(--red); }
   .dot.activating { background: var(--yellow); }
-  .svc-label { font-size: .78rem; color: var(--muted); }
+  .svc-label { font-size: .75rem; color: var(--muted); }
 
-  /* ── Buffer monitor ── */
+  /* Mode switch button */
+  .btn-mode {
+    width: 100%; border: none; border-radius: 9px; cursor: pointer;
+    font-size: .88rem; font-weight: 600; padding: .65rem 1rem;
+    transition: background .2s, opacity .2s;
+  }
+  .btn-mode.to-buffer { background: rgba(251,191,36,.15); color: var(--yellow); border: 1px solid rgba(251,191,36,.3); }
+  .btn-mode.to-buffer:hover { background: rgba(251,191,36,.25); }
+  .btn-mode.to-live   { background: rgba(52,211,153,.12); color: var(--green);  border: 1px solid rgba(52,211,153,.3); }
+  .btn-mode.to-live:hover   { background: rgba(52,211,153,.22); }
+
+  /* ── Log terminal ── */
+  .terminal-card {
+    background: #080810; border: 1px solid var(--border);
+    border-radius: 14px; overflow: hidden; margin-bottom: 1rem;
+  }
+  .terminal-header {
+    background: var(--card); border-bottom: 1px solid var(--border);
+    padding: .6rem 1rem; display: flex; align-items: center;
+    justify-content: space-between;
+  }
+  .terminal-title {
+    font-size: .7rem; font-weight: 700; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .terminal-actions { display: flex; gap: .5rem; }
+  .btn-tiny {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--muted); cursor: pointer; font-size: .72rem; padding: .2rem .6rem;
+  }
+  .btn-tiny:hover { border-color: var(--accent-light); color: var(--text); }
+  .log-body {
+    font-family: 'SF Mono', 'Fira Mono', 'Cascadia Code', monospace;
+    font-size: .72rem; line-height: 1.6;
+    height: 240px; overflow-y: auto; padding: .75rem;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  .log-line { white-space: pre-wrap; word-break: break-all; }
+  .log-ok   { color: #34d399; }
+  .log-err  { color: #f87171; }
+  .log-warn { color: #fbbf24; }
+  .log-info { color: #94a3b8; }
+  .log-dim  { color: #3a3a5c; }   /* timestamps / hostname */
+
+  /* ── Cards ── */
   .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 1.25rem;
-    margin-bottom: 1rem;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 1.25rem; margin-bottom: 1rem;
   }
   .card-title {
-    font-size: .7rem;
-    font-weight: 700;
-    letter-spacing: .1em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 1rem;
+    font-size: .7rem; font-weight: 700; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 1rem;
   }
 
+  /* Buffer stats */
   .buf-stats {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: .5rem;
-    margin-bottom: 1rem;
+    display: grid; grid-template-columns: repeat(3,1fr);
+    gap: .5rem; margin-bottom: 1rem;
   }
   .buf-stat {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: .65rem .5rem;
-    text-align: center;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: .65rem .5rem; text-align: center;
   }
-  .buf-stat-val {
-    font-size: 1.15rem;
-    font-weight: 700;
-    color: var(--accent-light);
-    display: block;
-  }
-  .buf-stat-lbl {
-    font-size: .7rem;
-    color: var(--muted);
-    display: block;
-    margin-top: .1rem;
-  }
-
-  /* Fill bar */
+  .buf-stat-val { font-size: 1.1rem; font-weight: 700; color: var(--accent-light); display: block; }
+  .buf-stat-lbl { font-size: .7rem; color: var(--muted); display: block; margin-top: .1rem; }
   .fill-bar-wrap {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    height: 10px;
-    overflow: hidden;
-    margin-bottom: .4rem;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 999px; height: 9px; overflow: hidden; margin-bottom: .4rem;
   }
   .fill-bar-inner {
-    height: 100%;
-    border-radius: 999px;
+    height: 100%; border-radius: 999px;
     background: linear-gradient(90deg, var(--accent), var(--accent-light));
-    transition: width .6s ease;
-    min-width: 4px;
+    transition: width .6s ease; min-width: 3px;
   }
   .fill-bar-label {
-    display: flex;
-    justify-content: space-between;
-    font-size: .72rem;
-    color: var(--muted);
-    margin-bottom: 1rem;
+    display: flex; justify-content: space-between;
+    font-size: .72rem; color: var(--muted); margin-bottom: 1rem;
   }
-
-  /* Chunk list */
   .chunk-list-wrap {
-    max-height: 200px;
-    overflow-y: auto;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    margin-bottom: 1rem;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
+    max-height: 180px; overflow-y: auto; border: 1px solid var(--border);
+    border-radius: 10px; margin-bottom: 1rem;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
-  .chunk-list {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: .78rem;
-  }
+  .chunk-list { width: 100%; border-collapse: collapse; font-size: .78rem; }
   .chunk-list thead th {
-    background: var(--bg);
-    color: var(--muted);
-    font-weight: 600;
-    padding: .45rem .75rem;
-    text-align: left;
-    position: sticky;
-    top: 0;
-    letter-spacing: .04em;
-    font-size: .7rem;
-    text-transform: uppercase;
+    background: var(--bg); color: var(--muted); font-weight: 600;
+    padding: .45rem .75rem; text-align: left; position: sticky; top: 0;
+    font-size: .7rem; text-transform: uppercase; letter-spacing: .04em;
   }
   .chunk-list tbody tr { border-top: 1px solid var(--border); }
   .chunk-list tbody tr:hover { background: rgba(167,139,250,.05); }
-  .chunk-list td { padding: .4rem .75rem; color: var(--text); }
+  .chunk-list td { padding: .38rem .75rem; }
   .chunk-list td.dim { color: var(--muted); }
   .chunk-list td.right { text-align: right; }
 
+  /* Sliders */
+  .slider-row { margin-bottom: 1rem; }
+  .slider-row:last-child { margin-bottom: 0; }
+  .slider-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: .4rem; }
+  .slider-label { font-size: .9rem; }
+  .slider-value { font-size: .9rem; font-weight: 700; color: var(--accent-light); min-width: 4rem; text-align: right; }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+    background: var(--border); border-radius: 3px; outline: none; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+    background: var(--accent); cursor: pointer; transition: background .15s;
+  }
+  input[type=range]::-webkit-slider-thumb:hover { background: var(--accent-light); }
+
+  /* Stream */
+  .stream-row { display: flex; gap: .6rem; margin-bottom: .75rem; }
+  .stream-row select, .stream-row input {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: .9rem; padding: .55rem .75rem;
+    outline: none; transition: border-color .2s;
+  }
+  .stream-row select { flex: 0 0 auto; }
+  .stream-row input { flex: 1; min-width: 0; }
+  input:focus, select:focus { border-color: var(--accent-light); }
+
   /* Buttons */
   .btn {
-    border: none;
-    border-radius: 10px;
-    cursor: pointer;
-    font-size: .9rem;
-    font-weight: 600;
-    padding: .7rem 1.2rem;
+    border: none; border-radius: 10px; cursor: pointer;
+    font-size: .9rem; font-weight: 600; padding: .7rem 1.2rem;
     transition: opacity .2s, background .2s;
   }
   .btn:disabled { opacity: .4; cursor: not-allowed; }
@@ -461,92 +424,39 @@ MAIN_PAGE = """<!doctype html>
   .btn-success { background: #064e3b; color: #6ee7b7; }
   .btn-success:hover:not(:disabled) { background: #065f46; }
   .btn-sm { font-size: .8rem; padding: .4rem .9rem; border-radius: 8px; }
-  .btn-ghost {
-    background: none; border: 1px solid var(--border);
-    color: var(--muted);
-  }
+  .btn-ghost { background: none; border: 1px solid var(--border); color: var(--muted); }
   .btn-ghost:hover:not(:disabled) { border-color: var(--accent-light); color: var(--text); }
   .btn-row { display: flex; gap: .6rem; flex-wrap: wrap; }
   .btn-row .btn { flex: 1; }
 
-  /* Stream */
-  .stream-row { display: flex; gap: .6rem; margin-bottom: .75rem; }
-  .stream-row select, .stream-row input {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: .9rem;
-    padding: .55rem .75rem;
-    outline: none;
-    transition: border-color .2s;
-  }
-  .stream-row select { flex: 0 0 auto; }
-  .stream-row input { flex: 1; min-width: 0; }
-  input:focus, select:focus { border-color: var(--accent-light); }
-
-  /* Sliders */
-  .slider-row { margin-bottom: 1rem; }
-  .slider-row:last-child { margin-bottom: 0; }
-  .slider-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: .4rem;
-  }
-  .slider-label { font-size: .9rem; }
-  .slider-value {
-    font-size: .9rem; font-weight: 700;
-    color: var(--accent-light); min-width: 4rem; text-align: right;
-  }
-  input[type=range] {
-    -webkit-appearance: none; appearance: none;
-    width: 100%; height: 6px;
-    background: var(--border); border-radius: 3px;
-    outline: none; cursor: pointer;
-  }
-  input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 20px; height: 20px;
-    border-radius: 50%; background: var(--accent);
-    cursor: pointer; transition: background .15s;
-  }
-  input[type=range]::-webkit-slider-thumb:hover { background: var(--accent-light); }
-
   /* Presets */
   .preset-list { list-style: none; }
-  .preset-item {
-    display: flex; align-items: center; gap: .6rem;
-    padding: .5rem 0; border-bottom: 1px solid var(--border);
-  }
+  .preset-item { display: flex; align-items: center; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--border); }
   .preset-item:last-child { border-bottom: none; }
   .preset-name { flex: 0 0 120px; font-size: .85rem; font-weight: 600; }
   .preset-url { flex: 1; font-size: .75rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .add-preset-row { display: flex; gap: .5rem; margin-top: .75rem; flex-wrap: wrap; }
   .add-preset-row input {
-    background: var(--bg); border: 1px solid var(--border);
-    border-radius: 8px; color: var(--text); font-size: .85rem;
-    padding: .45rem .7rem; outline: none; flex: 1; min-width: 80px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: .85rem; padding: .45rem .7rem;
+    outline: none; flex: 1; min-width: 80px;
   }
   .add-preset-row input:focus { border-color: var(--accent-light); }
 
   /* PIN */
   .pin-row { display: flex; gap: .6rem; }
   .pin-row input {
-    background: var(--bg); border: 1px solid var(--border);
-    border-radius: 8px; color: var(--text); font-size: 1rem;
-    letter-spacing: .2rem; padding: .55rem .75rem;
-    text-align: center; width: 100px; outline: none; flex-shrink: 0;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 1rem; letter-spacing: .2rem;
+    padding: .55rem .75rem; text-align: center; width: 100px; outline: none; flex-shrink: 0;
   }
   .pin-row input:focus { border-color: var(--accent-light); }
 
   /* Toast */
   #toast {
-    position: fixed; bottom: 1.5rem; left: 50%;
-    transform: translateX(-50%);
-    background: #1e1b4b; border: 1px solid var(--accent);
-    border-radius: 10px; color: var(--text);
-    font-size: .9rem; padding: .7rem 1.5rem;
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+    background: #1e1b4b; border: 1px solid var(--accent); border-radius: 10px;
+    color: var(--text); font-size: .9rem; padding: .7rem 1.5rem;
     opacity: 0; pointer-events: none; transition: opacity .3s;
     white-space: nowrap; z-index: 100;
   }
@@ -584,28 +494,67 @@ MAIN_PAGE = """<!doctype html>
 </header>
 
 <!-- ── Now Playing ── -->
-<div class="now-playing" id="nowPlaying">
-  <div class="np-header">
+<div class="now-playing">
+  <div class="np-top">
     <span class="np-badge {{ state.mode }}" id="npBadge">
       <span class="pulse"></span>
       <span id="npMode">{{ state.mode | upper }}</span>
     </span>
     <span class="np-duration" id="npDuration">—</span>
   </div>
-  <div class="svc-row" style="margin-bottom:.75rem">
+
+  <!-- Title: stream name or "Buffer Playback" -->
+  <div class="np-title" id="npTitle">
+    {% if state.mode in ('live', 'starting') %}
+      {{ state.name or state.url }}
+    {% elif state.mode in ('buffer', 'forced') %}
+      Buffer Playback
+    {% else %}
+      —
+    {% endif %}
+  </div>
+
+  <!-- Subtitle: URL or buffer stats -->
+  <div class="np-subtitle" id="npSubtitle">
+    {% if state.mode in ('live', 'starting') %}
+      {{ state.url }}
+    {% elif state.mode in ('buffer', 'forced') %}
+      {{ buf.chunk_count }} chunks &middot; {{ (buf.covers_seconds // 60) }} min &middot; {{ '%.1f' % (buf.total_bytes / 1048576) }} MB on disk
+    {% endif %}
+  </div>
+
+  <div class="svc-row">
     <div class="dot {{ svc_status }}" id="svcDot"></div>
     <span class="svc-label" id="svcLabel">radio.service — {{ svc_status }}</span>
   </div>
-  <div class="np-url">
-    <strong>Stream</strong>
-    <span id="npUrl">{{ state.url or '—' }}</span>
+
+  <!-- Mode switch button -->
+  {% if state.mode in ('buffer', 'forced') %}
+  <button class="btn-mode to-live" id="modeBtn" onclick="switchMode('live')">
+    ↑ Resume Live Stream
+  </button>
+  {% else %}
+  <button class="btn-mode to-buffer" id="modeBtn" onclick="switchMode('buffer')">
+    ↓ Switch to Buffer
+  </button>
+  {% endif %}
+</div>
+
+<!-- ── Log Terminal ── -->
+<div class="terminal-card">
+  <div class="terminal-header">
+    <span class="terminal-title">⬛ radio.service log</span>
+    <div class="terminal-actions">
+      <button class="btn-tiny" id="scrollLockBtn" onclick="toggleScrollLock()">Auto-scroll ✓</button>
+      <button class="btn-tiny" onclick="clearLog()">Clear</button>
+    </div>
   </div>
+  <div class="log-body" id="logBody"></div>
 </div>
 
 <!-- ── Buffer Monitor ── -->
 <div class="card">
   <div class="card-title">📼 Buffer</div>
-
   <div class="buf-stats">
     <div class="buf-stat">
       <span class="buf-stat-val" id="bChunks">{{ buf.chunk_count }}</span>
@@ -620,7 +569,6 @@ MAIN_PAGE = """<!doctype html>
       <span class="buf-stat-lbl">on disk</span>
     </div>
   </div>
-
   <div class="fill-bar-wrap">
     <div class="fill-bar-inner" id="fillBar"
          style="width:{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%"></div>
@@ -629,16 +577,9 @@ MAIN_PAGE = """<!doctype html>
     <span id="fillLabel">{{ buf.chunk_count }} / {{ buf.max_chunks }} chunks</span>
     <span id="fillPct">{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%</span>
   </div>
-
   <div class="chunk-list-wrap">
     <table class="chunk-list">
-      <thead>
-        <tr>
-          <th>File</th>
-          <th>Size</th>
-          <th>Age</th>
-        </tr>
-      </thead>
+      <thead><tr><th>File</th><th>Size</th><th>Age</th></tr></thead>
       <tbody id="chunkTable">
         {% for f in buf.files | reverse %}
         <tr>
@@ -652,7 +593,6 @@ MAIN_PAGE = """<!doctype html>
       </tbody>
     </table>
   </div>
-
   <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
 </div>
 
@@ -664,8 +604,7 @@ MAIN_PAGE = """<!doctype html>
       <span class="slider-label">Output Level</span>
       <span class="slider-value" id="volDisplay">{{ cfg.volume }}%</span>
     </div>
-    <input type="range" id="volumeSlider" min="0" max="100"
-           value="{{ cfg.volume }}" step="1">
+    <input type="range" id="volumeSlider" min="0" max="100" value="{{ cfg.volume }}" step="1">
   </div>
 </div>
 
@@ -692,8 +631,7 @@ MAIN_PAGE = """<!doctype html>
       <span class="slider-label">Chunk Size</span>
       <span class="slider-value" id="chunkDisplay">{{ cfg.chunk_seconds }}s</span>
     </div>
-    <input type="range" id="chunkSlider" min="60" max="600"
-           value="{{ cfg.chunk_seconds }}" step="30"
+    <input type="range" id="chunkSlider" min="60" max="600" value="{{ cfg.chunk_seconds }}" step="30"
            oninput="document.getElementById('chunkDisplay').textContent=this.value+'s'">
   </div>
   <div class="slider-row">
@@ -701,8 +639,7 @@ MAIN_PAGE = """<!doctype html>
       <span class="slider-label">Buffer Duration</span>
       <span class="slider-value" id="bufferDisplay">{{ cfg.buffer_minutes }}m</span>
     </div>
-    <input type="range" id="bufferSlider" min="30" max="360"
-           value="{{ cfg.buffer_minutes }}" step="30"
+    <input type="range" id="bufferSlider" min="30" max="360" value="{{ cfg.buffer_minutes }}" step="30"
            oninput="document.getElementById('bufferDisplay').textContent=this.value+'m'">
   </div>
   <div class="slider-row">
@@ -710,8 +647,7 @@ MAIN_PAGE = """<!doctype html>
       <span class="slider-label">Check Interval</span>
       <span class="slider-value" id="intervalDisplay">{{ cfg.check_interval }}s</span>
     </div>
-    <input type="range" id="intervalSlider" min="5" max="60"
-           value="{{ cfg.check_interval }}" step="5"
+    <input type="range" id="intervalSlider" min="5" max="60" value="{{ cfg.check_interval }}" step="5"
            oninput="document.getElementById('intervalDisplay').textContent=this.value+'s'">
   </div>
 </div>
@@ -722,9 +658,7 @@ MAIN_PAGE = """<!doctype html>
   <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">
     Saves all settings and restarts the radio service.
   </p>
-  <button class="btn btn-primary" style="width:100%" onclick="applySettings()">
-    Apply &amp; Restart
-  </button>
+  <button class="btn btn-primary" style="width:100%" onclick="applySettings()">Apply &amp; Restart</button>
 </div>
 
 <!-- ── Service Controls ── -->
@@ -745,8 +679,7 @@ MAIN_PAGE = """<!doctype html>
     <li class="preset-item" data-url="{{ s.url }}">
       <span class="preset-name">{{ s.name }}</span>
       <span class="preset-url">{{ s.url }}</span>
-      <button class="btn btn-sm btn-danger"
-              onclick="removePreset('{{ s.url }}')">✕</button>
+      <button class="btn btn-sm btn-danger" onclick="removePreset('{{ s.url }}')">✕</button>
     </li>
     {% endfor %}
   </ul>
@@ -761,8 +694,8 @@ MAIN_PAGE = """<!doctype html>
 <div class="card">
   <div class="card-title">🔒 Change PIN</div>
   <div class="pin-row">
-    <input type="password" id="newPin" inputmode="numeric"
-           pattern="[0-9]*" maxlength="8" placeholder="New PIN">
+    <input type="password" id="newPin" inputmode="numeric" pattern="[0-9]*"
+           maxlength="8" placeholder="New PIN">
     <button class="btn btn-primary btn-sm" onclick="changePin()">Save PIN</button>
   </div>
 </div>
@@ -771,7 +704,7 @@ MAIN_PAGE = """<!doctype html>
 <div class="overlay" id="clearOverlay">
   <div class="dialog">
     <h2>Clear buffer?</h2>
-    <p>This deletes all cached audio files. If the live stream is down, playback will stop until new chunks are recorded.</p>
+    <p>Deletes all cached audio. If the live stream is down, playback will stop until new chunks are recorded.</p>
     <div class="btn-row">
       <button class="btn btn-ghost" onclick="closeClear()">Cancel</button>
       <button class="btn btn-danger" onclick="doClear()">Clear</button>
@@ -788,31 +721,27 @@ function toast(msg, isError=false) {
   t.textContent = msg;
   t.className = 'show' + (isError ? ' error' : '');
   clearTimeout(window._toastTimer);
-  window._toastTimer = setTimeout(() => t.className = '', 2500);
+  window._toastTimer = setTimeout(() => t.className = '', 2600);
 }
 
-// ── Relative time ──
-function relTime(ts) {
-  const s = Math.floor(Date.now() / 1000) - ts;
-  if (s < 60)  return s + 's ago';
-  if (s < 3600) return Math.floor(s/60) + 'm ago';
-  return Math.floor(s/3600) + 'h ago';
-}
-
+// ── Duration ticker ──
+let npSince = {{ state.since or 0 }};
 function durSince(ts) {
   if (!ts) return '—';
-  const s = Math.floor(Date.now() / 1000) - ts;
-  if (s < 0) return '—';
-  if (s < 60) return s + 's';
+  const s = Math.max(0, Math.floor(Date.now()/1000) - ts);
+  if (s < 60)   return s + 's';
   if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
   return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
 }
+setInterval(() => { document.getElementById('npDuration').textContent = durSince(npSince); }, 1000);
 
-function fmtMB(bytes) {
-  return (bytes/1048576).toFixed(1) + 'MB';
+// ── Relative time for chunk ages ──
+function relTime(ts) {
+  const s = Math.floor(Date.now()/1000) - ts;
+  if (s < 60)   return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
 }
-
-// ── Age cells ──
 function refreshAgeCells() {
   document.querySelectorAll('[data-ts]').forEach(td => {
     td.textContent = relTime(parseInt(td.dataset.ts));
@@ -821,23 +750,140 @@ function refreshAgeCells() {
 setInterval(refreshAgeCells, 10000);
 refreshAgeCells();
 
-// ── Now Playing duration ticker ──
-let npSince = {{ state.since or 0 }};
-function tickDuration() {
-  document.getElementById('npDuration').textContent = durSince(npSince);
-}
-setInterval(tickDuration, 1000);
-tickDuration();
+// ── Log terminal ──
+const logBody = document.getElementById('logBody');
+let autoScroll = true;
+let lineCount  = 0;
+const MAX_LINES = 300;
 
-// ── Preset select ──
-function applyPreset() {
-  const sel = document.getElementById('presetSelect');
-  if (sel.value) document.getElementById('streamUrl').value = sel.value;
-  sel.value = '';
+function toggleScrollLock() {
+  autoScroll = !autoScroll;
+  document.getElementById('scrollLockBtn').textContent =
+    autoScroll ? 'Auto-scroll ✓' : 'Auto-scroll ✗';
+}
+function clearLog() { logBody.innerHTML = ''; lineCount = 0; }
+
+function classifyLine(line) {
+  const l = line.toLowerCase();
+  if (l.includes('error') || l.includes('failed') || l.includes('fail') || l.includes('exiting')) return 'log-err';
+  if (l.includes('down') || l.includes('buffer') || l.includes('backup') || l.includes('force')) return 'log-warn';
+  if (l.includes('stream ok') || l.includes('live') || l.includes('detected')) return 'log-ok';
+  return 'log-info';
 }
 
-// ── Volume (debounced live update) ──
-const volSlider = document.getElementById('volumeSlider');
+function appendLog(raw) {
+  // Split the journalctl prefix (timestamp + host + unit) from the message
+  // Format: "Apr 14 21:52:43 raspberrypi radio.sh[1266]: [radio] ..."
+  const match = raw.match(/^(\w{3}\s+\d+\s+[\d:]+\s+\S+\s+\S+\[\d+\]:\s*)(.*)/);
+  let prefix = '', msg = raw;
+  if (match) { prefix = match[1]; msg = match[2]; }
+
+  const div = document.createElement('div');
+  div.className = 'log-line ' + classifyLine(msg);
+  div.innerHTML = (prefix ? `<span class="log-dim">${esc(prefix)}</span>` : '') + esc(msg);
+  logBody.appendChild(div);
+  lineCount++;
+
+  // Trim oldest lines
+  while (lineCount > MAX_LINES) {
+    logBody.removeChild(logBody.firstChild);
+    lineCount--;
+  }
+
+  if (autoScroll) logBody.scrollTop = logBody.scrollHeight;
+}
+
+// Connect SSE
+function connectSSE() {
+  const es = new EventSource('/logs');
+  es.onmessage = e => { try { appendLog(JSON.parse(e.data)); } catch {} };
+  es.onerror = () => { setTimeout(connectSSE, 5000); es.close(); };
+}
+connectSSE();
+
+// ── Mode switch ──
+function switchMode(mode) {
+  api('/mode', { mode })
+    .then(() => { toast(mode === 'buffer' ? 'Switching to buffer…' : 'Resuming live stream…'); })
+    .catch(() => toast('Mode switch failed', true));
+}
+
+// ── Update Now Playing ──
+function updateNP(state, buf) {
+  // Badge
+  const badge = document.getElementById('npBadge');
+  const modeEl = document.getElementById('npMode');
+  badge.className = 'np-badge ' + state.mode;
+  modeEl.textContent = state.mode.toUpperCase();
+  npSince = state.since || 0;
+
+  // Title + subtitle
+  const titleEl    = document.getElementById('npTitle');
+  const subtitleEl = document.getElementById('npSubtitle');
+  if (state.mode === 'live' || state.mode === 'starting') {
+    titleEl.textContent    = state.name || state.url || '—';
+    subtitleEl.textContent = state.url || '';
+  } else if (state.mode === 'buffer' || state.mode === 'forced') {
+    titleEl.textContent    = 'Buffer Playback';
+    const mins = Math.floor((buf.covers_seconds || 0) / 60);
+    const mb   = ((buf.total_bytes || 0) / 1048576).toFixed(1);
+    subtitleEl.textContent = `${buf.chunk_count} chunks · ${mins} min · ${mb} MB on disk`;
+  } else {
+    titleEl.textContent = '—'; subtitleEl.textContent = '';
+  }
+
+  // Mode button
+  const btn = document.getElementById('modeBtn');
+  if (state.mode === 'buffer' || state.mode === 'forced') {
+    btn.className = 'btn-mode to-live';
+    btn.textContent = '↑ Resume Live Stream';
+    btn.onclick = () => switchMode('live');
+  } else {
+    btn.className = 'btn-mode to-buffer';
+    btn.textContent = '↓ Switch to Buffer';
+    btn.onclick = () => switchMode('buffer');
+  }
+}
+
+function updateSvc(status) {
+  document.getElementById('svcDot').className   = 'dot ' + status;
+  document.getElementById('svcLabel').textContent = 'radio.service — ' + status;
+}
+
+function updateBuffer(buf) {
+  document.getElementById('bChunks').textContent = buf.chunk_count;
+  document.getElementById('bCovers').textContent = Math.floor(buf.covers_seconds/60) + 'm';
+  document.getElementById('bSize').textContent   = (buf.total_bytes/1048576).toFixed(1) + 'MB';
+
+  const pct = buf.max_chunks ? Math.min(100, Math.round(buf.chunk_count*100/buf.max_chunks)) : 0;
+  document.getElementById('fillBar').style.width    = pct + '%';
+  document.getElementById('fillLabel').textContent  = `${buf.chunk_count} / ${buf.max_chunks} chunks`;
+  document.getElementById('fillPct').textContent    = pct + '%';
+
+  const tbody = document.getElementById('chunkTable');
+  if (!buf.files.length) {
+    tbody.innerHTML = '<tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>';
+    return;
+  }
+  tbody.innerHTML = [...buf.files].reverse().map(f =>
+    `<tr><td>${esc(f.name)}</td>
+     <td class="dim">${(f.size/1048576).toFixed(1)} MB</td>
+     <td class="dim right" data-ts="${f.mtime}">${relTime(f.mtime)}</td></tr>`
+  ).join('');
+}
+
+// ── Poll every 8 s ──
+function poll() {
+  fetch('/status').then(r => r.json()).then(d => {
+    updateNP(d.state, d.buffer);
+    updateSvc(d.svc_status);
+    updateBuffer(d.buffer);
+  }).catch(() => {});
+}
+setInterval(poll, 8000);
+
+// ── Volume ──
+const volSlider  = document.getElementById('volumeSlider');
 const volDisplay = document.getElementById('volDisplay');
 let volTimer;
 volSlider.addEventListener('input', () => {
@@ -872,63 +918,6 @@ function serviceAction(action) {
     .catch(() => toast('Service action failed', true));
 }
 
-// ── Update Now Playing UI ──
-function updateNP(state) {
-  const badge = document.getElementById('npBadge');
-  const modeEl = document.getElementById('npMode');
-  const urlEl  = document.getElementById('npUrl');
-  badge.className = 'np-badge ' + state.mode;
-  modeEl.textContent = state.mode.toUpperCase();
-  urlEl.textContent  = state.url || '—';
-  npSince = state.since || 0;
-}
-
-function updateSvc(status) {
-  const dot   = document.getElementById('svcDot');
-  const label = document.getElementById('svcLabel');
-  dot.className  = 'dot ' + status;
-  label.textContent = 'radio.service — ' + status;
-}
-
-// ── Update buffer UI ──
-function updateBuffer(buf) {
-  document.getElementById('bChunks').textContent  = buf.chunk_count;
-  document.getElementById('bCovers').textContent  = Math.floor(buf.covers_seconds / 60) + 'm';
-  document.getElementById('bSize').textContent    = fmtMB(buf.total_bytes);
-
-  const pct = buf.max_chunks ? Math.min(100, Math.round(buf.chunk_count * 100 / buf.max_chunks)) : 0;
-  document.getElementById('fillBar').style.width  = pct + '%';
-  document.getElementById('fillLabel').textContent = buf.chunk_count + ' / ' + buf.max_chunks + ' chunks';
-  document.getElementById('fillPct').textContent   = pct + '%';
-
-  // Rebuild chunk table
-  const tbody = document.getElementById('chunkTable');
-  if (!buf.files.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>';
-    return;
-  }
-  tbody.innerHTML = [...buf.files].reverse().map(f =>
-    `<tr>
-      <td>${esc(f.name)}</td>
-      <td class="dim">${(f.size/1048576).toFixed(1)} MB</td>
-      <td class="dim right" data-ts="${f.mtime}">${relTime(f.mtime)}</td>
-    </tr>`
-  ).join('');
-}
-
-// ── Poll status + buffer every 8 s ──
-function poll() {
-  fetch('/status')
-    .then(r => r.json())
-    .then(d => {
-      updateNP(d.state);
-      updateSvc(d.svc_status);
-      updateBuffer(d.buffer);
-    })
-    .catch(() => {});
-}
-setInterval(poll, 8000);
-
 // ── Clear buffer ──
 function confirmClear() { document.getElementById('clearOverlay').classList.add('open'); }
 function closeClear()   { document.getElementById('clearOverlay').classList.remove('open'); }
@@ -940,57 +929,50 @@ function doClear() {
 }
 
 // ── Presets ──
+function applyPreset() {
+  const sel = document.getElementById('presetSelect');
+  if (sel.value) document.getElementById('streamUrl').value = sel.value;
+  sel.value = '';
+}
 function addPreset() {
   const name = document.getElementById('newPresetName').value.trim();
   const url  = document.getElementById('newPresetUrl').value.trim();
   if (!name || !url) return toast('Name and URL are required', true);
-  api('/presets/add', { name, url })
-    .then(() => {
-      toast('Preset added');
-      document.getElementById('newPresetName').value = '';
-      document.getElementById('newPresetUrl').value  = '';
-      addPresetToDOM(name, url);
-      addPresetToSelect(name, url);
-    })
-    .catch(() => toast('Failed to add preset', true));
+  api('/presets/add', { name, url }).then(() => {
+    toast('Preset added');
+    document.getElementById('newPresetName').value = '';
+    document.getElementById('newPresetUrl').value  = '';
+    const li = document.createElement('li');
+    li.className = 'preset-item'; li.dataset.url = url;
+    li.innerHTML = `<span class="preset-name">${esc(name)}</span>
+      <span class="preset-url">${esc(url)}</span>
+      <button class="btn btn-sm btn-danger" onclick="removePreset('${esc(url)}')">✕</button>`;
+    document.getElementById('presetList').appendChild(li);
+    const opt = document.createElement('option');
+    opt.value = url; opt.textContent = name;
+    document.getElementById('presetSelect').appendChild(opt);
+  }).catch(() => toast('Failed to add preset', true));
 }
-
 function removePreset(url) {
-  api('/presets/remove', { url })
-    .then(() => {
-      toast('Preset removed');
-      const item = document.querySelector(`[data-url="${CSS.escape(url)}"]`);
-      if (item) item.remove();
-      const opt = document.querySelector(`#presetSelect option[value="${CSS.escape(url)}"]`);
-      if (opt) opt.remove();
-    })
-    .catch(() => toast('Failed to remove preset', true));
-}
-
-function addPresetToDOM(name, url) {
-  const li = document.createElement('li');
-  li.className = 'preset-item'; li.dataset.url = url;
-  li.innerHTML = `<span class="preset-name">${esc(name)}</span>
-    <span class="preset-url">${esc(url)}</span>
-    <button class="btn btn-sm btn-danger" onclick="removePreset('${esc(url)}')">✕</button>`;
-  document.getElementById('presetList').appendChild(li);
-}
-function addPresetToSelect(name, url) {
-  const opt = document.createElement('option');
-  opt.value = url; opt.textContent = name;
-  document.getElementById('presetSelect').appendChild(opt);
+  api('/presets/remove', { url }).then(() => {
+    toast('Preset removed');
+    const item = document.querySelector(`[data-url="${CSS.escape(url)}"]`);
+    if (item) item.remove();
+    const opt = document.querySelector(`#presetSelect option[value="${CSS.escape(url)}"]`);
+    if (opt) opt.remove();
+  }).catch(() => toast('Failed to remove preset', true));
 }
 
 // ── PIN ──
 function changePin() {
   const pin = document.getElementById('newPin').value.trim();
   if (!/^\d{4,8}$/.test(pin)) return toast('PIN must be 4–8 digits', true);
-  api('/pin', { pin })
-    .then(() => { toast('PIN updated'); document.getElementById('newPin').value = ''; })
-    .catch(() => toast('Failed to update PIN', true));
+  api('/pin', { pin }).then(() => {
+    toast('PIN updated'); document.getElementById('newPin').value = '';
+  }).catch(() => toast('Failed to update PIN', true));
 }
 
-// ── Escape helper ──
+// ── Escape ──
 function esc(s) {
   return String(s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
@@ -1051,15 +1033,67 @@ def logout():
     return redirect(url_for("index"))
 
 
+@app.route("/logs")
+def stream_logs():
+    """Server-Sent Events stream of journalctl output for radio.service."""
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+
+    def generate():
+        proc = subprocess.Popen(
+            ["journalctl", "-fu", "radio.service", "--no-pager", "-n", "80",
+             "--output=short"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    yield f"data: {json.dumps(line)}\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            proc.kill()
+            proc.wait()
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.route("/status")
 def get_status():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
     return jsonify({
         "svc_status": service_status(),
-        "state": playback_state(),
-        "buffer": buffer_info(),
+        "state":      playback_state(),
+        "buffer":     buffer_info(),
     })
+
+
+@app.route("/mode", methods=["POST"])
+def set_mode():
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    mode = request.get_json(force=True).get("mode", "")
+    if mode == "buffer":
+        open(FORCE_BUFFER, "w").close()
+        subprocess.run(["systemctl", "restart", "radio.service"], timeout=10)
+    elif mode == "live":
+        try:
+            os.remove(FORCE_BUFFER)
+        except FileNotFoundError:
+            pass
+        subprocess.run(["systemctl", "restart", "radio.service"], timeout=10)
+    else:
+        return jsonify({"error": "mode must be 'live' or 'buffer'"}), 400
+    return jsonify({"ok": True})
 
 
 @app.route("/apply", methods=["POST"])
@@ -1069,10 +1103,10 @@ def apply():
     data = request.get_json(force=True)
     cfg = load_config()
     cfg["stream_url"]     = str(data.get("stream_url", cfg["stream_url"]))
-    cfg["chunk_seconds"]  = max(60, min(600, int(data.get("chunk_seconds", cfg["chunk_seconds"]))))
-    cfg["buffer_minutes"] = max(30, min(360, int(data.get("buffer_minutes", cfg["buffer_minutes"]))))
-    cfg["check_interval"] = max(5, min(60, int(data.get("check_interval", cfg["check_interval"]))))
-    cfg["volume"]         = max(0, min(100, int(data.get("volume", cfg["volume"]))))
+    cfg["chunk_seconds"]  = max(60,  min(600, int(data.get("chunk_seconds",  cfg["chunk_seconds"]))))
+    cfg["buffer_minutes"] = max(30,  min(360, int(data.get("buffer_minutes", cfg["buffer_minutes"]))))
+    cfg["check_interval"] = max(5,   min(60,  int(data.get("check_interval", cfg["check_interval"]))))
+    cfg["volume"]         = max(0,   min(100, int(data.get("volume",         cfg["volume"]))))
     save_config(cfg)
     subprocess.run(["systemctl", "restart", "radio.service"], timeout=10)
     return jsonify({"ok": True})
@@ -1154,4 +1188,4 @@ def change_pin():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)

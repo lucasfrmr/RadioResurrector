@@ -18,6 +18,7 @@ VOLUME="${VOLUME:-90}"
 
 BUFFER_DIR="/opt/radio/buffer"
 STATE_FILE="/opt/radio/state.json"
+FORCE_BUFFER="/opt/radio/force_buffer"   # touch this file to force buffer mode
 MAX_CHUNKS=$(( BUFFER_MINUTES * 60 / CHUNK_SECONDS ))
 PLAYER="mpv --no-video --quiet --volume=${VOLUME} --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
 
@@ -63,7 +64,8 @@ start_watcher() {
   (
     while true; do
       sleep "$CHECK_INTERVAL"
-      if stream_ok; then
+      # Return to live only if force_buffer flag is gone AND stream is up
+      if [[ ! -f "$FORCE_BUFFER" ]] && stream_ok; then
         echo "[radio] Live stream detected (heartbeat). Restarting service."
         kill "$pid_to_kill" 2>/dev/null
         break
@@ -76,7 +78,6 @@ start_watcher() {
 # -------- Buffer playback --------
 play_buffer() {
   echo "[radio] Playing backup buffer..."
-  write_state "buffer"
   ls -1tr "$BUFFER_DIR"/*.mp3 > "$BUFFER_DIR/loop.m3u" 2>/dev/null
   mpv --no-video --quiet --volume="${VOLUME}" --loop-playlist=inf --audio-device=alsa "$BUFFER_DIR/loop.m3u" &
   MPV_PID=$!
@@ -94,13 +95,19 @@ echo "[radio] Recorder PID: $REC_PID"
 while true; do
   prune_buffer
 
-  if stream_ok; then
+  if [[ ! -f "$FORCE_BUFFER" ]] && stream_ok; then
     echo "[radio] Stream OK — playing live."
     write_state "live"
     $PLAYER "$STREAM_URL"
     echo "[radio] mpv exited; rechecking..."
   else
-    echo "[radio] Stream DOWN — using buffer."
+    if [[ -f "$FORCE_BUFFER" ]]; then
+      echo "[radio] Force buffer mode active."
+      write_state "forced"
+    else
+      echo "[radio] Stream DOWN — using buffer."
+      write_state "buffer"
+    fi
     play_buffer
     echo "[radio] Returning to live stream."
   fi
