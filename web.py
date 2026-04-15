@@ -234,13 +234,14 @@ MAIN_PAGE = """<!doctype html>
   }
   @media (min-width: 780px) {
     .dashboard-grid {
-      grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+      grid-template-columns: minmax(0,3fr) minmax(320px,1fr);
       gap: 1.25rem;
       align-items: start;
     }
     .col-right {
       position: sticky;
       top: 1rem;
+      max-width: 480px;
     }
     .log-body { height: 340px; }
     .chunk-list-wrap { max-height: 220px; }
