@@ -540,18 +540,6 @@ MAIN_PAGE = """<!doctype html>
         <span class="svc-label" id="svcLabel">radio.service — {{ svc_status }}</span>
       </div>
 
-      <!-- Stream selector lives here, next to the status -->
-      <div class="card-title" style="margin-bottom:.6rem">📡 Stream</div>
-      <div class="stream-row" style="margin-bottom:1rem">
-        <select id="presetSelect" onchange="applyPreset()">
-          <option value="">— Preset —</option>
-          {% for s in cfg.streams %}
-          <option value="{{ s.url }}">{{ s.name }}</option>
-          {% endfor %}
-        </select>
-        <input type="text" id="streamUrl" value="{{ cfg.stream_url }}">
-      </div>
-
       <!-- Mode switch button -->
       {% if state.mode in ('buffer', 'forced') %}
       <button class="btn-mode to-live" id="modeBtn" onclick="switchMode('live')">
@@ -621,6 +609,20 @@ MAIN_PAGE = """<!doctype html>
         <input type="text" id="newPresetName" placeholder="Name">
         <input type="text" id="newPresetUrl" placeholder="Stream URL">
         <button class="btn btn-sm btn-primary" onclick="addPreset()">Add</button>
+      </div>
+    </div>
+
+    <!-- ── Stream Selector ── -->
+    <div class="card">
+      <div class="card-title">📡 Stream</div>
+      <div class="stream-row">
+        <select id="presetSelect" onchange="applyPreset()">
+          <option value="">— Preset —</option>
+          {% for s in cfg.streams %}
+          <option value="{{ s.url }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" id="streamUrl" value="{{ cfg.stream_url }}">
       </div>
     </div>
 
