@@ -513,7 +513,7 @@ MAIN_PAGE = """<!doctype html>
   <!-- ══ LEFT COLUMN — controls ══ -->
   <div class="col-left">
 
-    <!-- ── Now Playing (+ stream selector) ── -->
+    <!-- ── Now Playing ── -->
     <div class="now-playing">
       <div class="np-top">
         <span class="np-badge {{ state.mode }}" id="npBadge">
@@ -522,7 +522,6 @@ MAIN_PAGE = """<!doctype html>
         </span>
         <span class="np-duration" id="npDuration">—</span>
       </div>
-
       <div class="np-title" id="npTitle">
         {% if state.mode in ('live', 'starting') %}{{ state.name or state.url }}
         {% elif state.mode in ('buffer', 'forced') %}Buffer Playback
@@ -534,13 +533,10 @@ MAIN_PAGE = """<!doctype html>
           {{ buf.chunk_count }} chunks &middot; {{ (buf.covers_seconds // 60) }} min &middot; {{ '%.1f' % (buf.total_bytes / 1048576) }} MB on disk
         {% endif %}
       </div>
-
       <div class="svc-row">
         <div class="dot {{ svc_status }}" id="svcDot"></div>
         <span class="svc-label" id="svcLabel">radio.service — {{ svc_status }}</span>
       </div>
-
-      <!-- Mode switch button -->
       {% if state.mode in ('buffer', 'forced') %}
       <button class="btn-mode to-live" id="modeBtn" onclick="switchMode('live')">
         ↑ Resume Live Stream
@@ -552,7 +548,19 @@ MAIN_PAGE = """<!doctype html>
       {% endif %}
     </div>
 
-    <!-- ── Volume ── -->
+    <!-- 1. Log -->
+    <div class="terminal-card">
+      <div class="terminal-header">
+        <span class="terminal-title">⬛ radio.service log</span>
+        <div class="terminal-actions">
+          <button class="btn-tiny" id="scrollLockBtn" onclick="toggleScrollLock()">Auto-scroll ✓</button>
+          <button class="btn-tiny" onclick="clearLog()">Clear</button>
+        </div>
+      </div>
+      <div class="log-body" id="logBody"></div>
+    </div>
+
+    <!-- 2. Volume -->
     <div class="card">
       <div class="card-title">🔊 Volume</div>
       <div class="slider-row">
@@ -564,78 +572,7 @@ MAIN_PAGE = """<!doctype html>
       </div>
     </div>
 
-    <!-- ── Recording Settings ── -->
-    <div class="card">
-      <div class="card-title">⏺ Recording Settings</div>
-      <div class="slider-row">
-        <div class="slider-header">
-          <span class="slider-label">Chunk Size</span>
-          <span class="slider-value" id="chunkDisplay">{{ cfg.chunk_seconds }}s</span>
-        </div>
-        <input type="range" id="chunkSlider" min="60" max="600" value="{{ cfg.chunk_seconds }}" step="30"
-               oninput="document.getElementById('chunkDisplay').textContent=this.value+'s'">
-      </div>
-      <div class="slider-row">
-        <div class="slider-header">
-          <span class="slider-label">Buffer Duration</span>
-          <span class="slider-value" id="bufferDisplay">{{ cfg.buffer_minutes }}m</span>
-        </div>
-        <input type="range" id="bufferSlider" min="30" max="360" value="{{ cfg.buffer_minutes }}" step="30"
-               oninput="document.getElementById('bufferDisplay').textContent=this.value+'m'">
-      </div>
-      <div class="slider-row">
-        <div class="slider-header">
-          <span class="slider-label">Check Interval</span>
-          <span class="slider-value" id="intervalDisplay">{{ cfg.check_interval }}s</span>
-        </div>
-        <input type="range" id="intervalSlider" min="5" max="60" value="{{ cfg.check_interval }}" step="5"
-               oninput="document.getElementById('intervalDisplay').textContent=this.value+'s'">
-      </div>
-    </div>
-
-    <!-- ── Stream Presets ── -->
-    <div class="card">
-      <div class="card-title">📋 Stream Presets</div>
-      <ul class="preset-list" id="presetList">
-        {% for s in cfg.streams %}
-        <li class="preset-item" data-url="{{ s.url }}">
-          <span class="preset-name">{{ s.name }}</span>
-          <span class="preset-url">{{ s.url }}</span>
-          <button class="btn btn-sm btn-danger" onclick="removePreset('{{ s.url }}')">✕</button>
-        </li>
-        {% endfor %}
-      </ul>
-      <div class="add-preset-row">
-        <input type="text" id="newPresetName" placeholder="Name">
-        <input type="text" id="newPresetUrl" placeholder="Stream URL">
-        <button class="btn btn-sm btn-primary" onclick="addPreset()">Add</button>
-      </div>
-    </div>
-
-    <!-- ── Stream Selector ── -->
-    <div class="card">
-      <div class="card-title">📡 Stream</div>
-      <div class="stream-row">
-        <select id="presetSelect" onchange="applyPreset()">
-          <option value="">— Preset —</option>
-          {% for s in cfg.streams %}
-          <option value="{{ s.url }}">{{ s.name }}</option>
-          {% endfor %}
-        </select>
-        <input type="text" id="streamUrl" value="{{ cfg.stream_url }}">
-      </div>
-    </div>
-
-    <!-- ── Apply ── -->
-    <div class="card">
-      <div class="card-title">Apply Changes</div>
-      <p style="font-size:.85rem;color:var(--muted);margin-bottom:1rem;">
-        Saves all settings and restarts the radio service.
-      </p>
-      <button class="btn btn-primary" style="width:100%" onclick="applySettings()">Apply &amp; Restart</button>
-    </div>
-
-    <!-- ── Service Controls ── -->
+    <!-- 3. Service (Stop / Restart) -->
     <div class="card">
       <div class="card-title">⚙ Service</div>
       <div class="btn-row">
@@ -645,34 +582,7 @@ MAIN_PAGE = """<!doctype html>
       </div>
     </div>
 
-    <!-- ── Change PIN ── -->
-    <div class="card">
-      <div class="card-title">🔒 Change PIN</div>
-      <div class="pin-row">
-        <input type="password" id="newPin" inputmode="numeric" pattern="[0-9]*"
-               maxlength="8" placeholder="New PIN">
-        <button class="btn btn-primary btn-sm" onclick="changePin()">Save PIN</button>
-      </div>
-    </div>
-
-  </div><!-- /col-left -->
-
-  <!-- ══ LOG COLUMN ══ -->
-  <div class="col-log">
-    <div class="terminal-card">
-      <div class="terminal-header">
-        <span class="terminal-title">⬛ radio.service log</span>
-        <div class="terminal-actions">
-          <button class="btn-tiny" id="scrollLockBtn" onclick="toggleScrollLock()">Auto-scroll ✓</button>
-          <button class="btn-tiny" onclick="clearLog()">Clear</button>
-        </div>
-      </div>
-      <div class="log-body" id="logBody"></div>
-    </div>
-  </div><!-- /col-log -->
-
-  <!-- ══ BUFFER COLUMN ══ -->
-  <div class="col-buffer">
+    <!-- 4. Buffer -->
     <div class="card">
       <div class="card-title">📼 Buffer</div>
       <div class="buf-stats">
@@ -715,7 +625,79 @@ MAIN_PAGE = """<!doctype html>
       </div>
       <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
     </div>
-  </div><!-- /col-buffer -->
+
+    <!-- 5. Recording Settings (chunk/buffer/interval) -->
+    <div class="card">
+      <div class="card-title">⏺ Recording Settings</div>
+      <div class="slider-row">
+        <div class="slider-header">
+          <span class="slider-label">Chunk Size</span>
+          <span class="slider-value" id="chunkDisplay">{{ cfg.chunk_seconds }}s</span>
+        </div>
+        <input type="range" id="chunkSlider" min="60" max="600" value="{{ cfg.chunk_seconds }}" step="30"
+               oninput="document.getElementById('chunkDisplay').textContent=this.value+'s'">
+      </div>
+      <div class="slider-row">
+        <div class="slider-header">
+          <span class="slider-label">Buffer Duration</span>
+          <span class="slider-value" id="bufferDisplay">{{ cfg.buffer_minutes }}m</span>
+        </div>
+        <input type="range" id="bufferSlider" min="30" max="360" value="{{ cfg.buffer_minutes }}" step="30"
+               oninput="document.getElementById('bufferDisplay').textContent=this.value+'m'">
+      </div>
+      <div class="slider-row">
+        <div class="slider-header">
+          <span class="slider-label">Check Interval</span>
+          <span class="slider-value" id="intervalDisplay">{{ cfg.check_interval }}s</span>
+        </div>
+        <input type="range" id="intervalSlider" min="5" max="60" value="{{ cfg.check_interval }}" step="5"
+               oninput="document.getElementById('intervalDisplay').textContent=this.value+'s'">
+      </div>
+    </div>
+
+    <!-- 6. Stream Presets -->
+    <div class="card">
+      <div class="card-title">📋 Stream Presets</div>
+      <ul class="preset-list" id="presetList">
+        {% for s in cfg.streams %}
+        <li class="preset-item" data-url="{{ s.url }}">
+          <span class="preset-name">{{ s.name }}</span>
+          <span class="preset-url">{{ s.url }}</span>
+          <button class="btn btn-sm btn-danger" onclick="removePreset('{{ s.url }}')">✕</button>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="add-preset-row">
+        <input type="text" id="newPresetName" placeholder="Name">
+        <input type="text" id="newPresetUrl" placeholder="Stream URL">
+        <button class="btn btn-sm btn-primary" onclick="addPreset()">Add</button>
+      </div>
+    </div>
+
+    <!-- 7. Stream + Apply (combined) -->
+    <div class="card">
+      <div class="card-title">📡 Stream &amp; Apply</div>
+      <div class="stream-row" style="margin-bottom:1rem">
+        <select id="presetSelect" onchange="applyPreset()">
+          <option value="">— Preset —</option>
+          {% for s in cfg.streams %}
+          <option value="{{ s.url }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" id="streamUrl" value="{{ cfg.stream_url }}">
+      </div>
+      <button class="btn btn-primary" style="width:100%" onclick="applySettings()">Apply &amp; Restart</button>
+    </div>
+
+    <!-- 8. Change PIN -->
+    <div class="card">
+      <div class="card-title">🔒 Change PIN</div>
+      <div class="pin-row">
+        <input type="password" id="newPin" inputmode="numeric" pattern="[0-9]*"
+               maxlength="8" placeholder="New PIN">
+        <button class="btn btn-primary btn-sm" onclick="changePin()">Save PIN</button>
+      </div>
+    </div>
 
 </div><!-- /dashboard-grid -->
 
