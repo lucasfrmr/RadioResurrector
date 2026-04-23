@@ -65,15 +65,19 @@ def write_shell_config(cfg):
         f.write(f'VOLUME={cfg["volume"]}\n')
 
 
-def service_status():
+def service_status(unit="radio.service"):
     try:
         r = subprocess.run(
-            ["systemctl", "is-active", "radio.service"],
+            ["systemctl", "is-active", unit],
             capture_output=True, text=True, timeout=5,
         )
         return r.stdout.strip()
     except Exception:
         return "unknown"
+
+
+def spotify_active():
+    return service_status("raspotify.service") == "active"
 
 
 def playback_state():
@@ -466,6 +470,41 @@ MAIN_PAGE = """<!doctype html>
   }
   .pin-row input:focus { border-color: var(--accent-light); }
 
+  /* Spotify toggle */
+  .spotify-card {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem;
+  }
+  .spotify-info { display: flex; align-items: center; gap: .75rem; }
+  .spotify-icon {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: #1db954; color: #000;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 1.2rem; font-weight: 900; flex-shrink: 0;
+  }
+  .spotify-text { display: flex; flex-direction: column; gap: .15rem; }
+  .spotify-title { font-size: .95rem; font-weight: 700; }
+  .spotify-sub { font-size: .75rem; color: var(--muted); }
+  .spotify-sub .on  { color: #1db954; font-weight: 700; }
+  .spotify-sub .off { color: var(--muted); }
+
+  /* iOS-style switch */
+  .switch { position: relative; display: inline-block; width: 52px; height: 30px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider-bg {
+    position: absolute; cursor: pointer; inset: 0;
+    background: var(--border); transition: background .2s;
+    border-radius: 30px;
+  }
+  .switch .slider-bg::before {
+    content: ""; position: absolute; height: 24px; width: 24px;
+    left: 3px; bottom: 3px; background: #fff;
+    transition: transform .2s; border-radius: 50%;
+  }
+  .switch input:checked + .slider-bg { background: #1db954; }
+  .switch input:checked + .slider-bg::before { transform: translateX(22px); }
+  .switch input:disabled + .slider-bg { opacity: .5; cursor: not-allowed; }
+
   /* Toast */
   #toast {
     position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
@@ -546,6 +585,25 @@ MAIN_PAGE = """<!doctype html>
         ↓ Switch to Buffer
       </button>
       {% endif %}
+    </div>
+
+    <!-- Spotify Connect -->
+    <div class="card spotify-card">
+      <div class="spotify-info">
+        <div class="spotify-icon">♫</div>
+        <div class="spotify-text">
+          <span class="spotify-title">Spotify Connect</span>
+          <span class="spotify-sub" id="spotifySub">
+            {% if spotify_on %}<span class="on">Active</span> — live stream paused
+            {% else %}<span class="off">Off</span> — live stream running{% endif %}
+          </span>
+        </div>
+      </div>
+      <label class="switch" title="Enable to stream Spotify instead of the radio">
+        <input type="checkbox" id="spotifyToggle" {% if spotify_on %}checked{% endif %}
+               onchange="toggleSpotify(this)">
+        <span class="slider-bg"></span>
+      </label>
     </div>
 
     <!-- 1. Log -->
@@ -875,12 +933,37 @@ function updateBuffer(buf) {
   ).join('');
 }
 
+// ── Spotify toggle ──
+function updateSpotifyUI(on) {
+  const sub = document.getElementById('spotifySub');
+  sub.innerHTML = on
+    ? '<span class="on">Active</span> — live stream paused'
+    : '<span class="off">Off</span> — live stream running';
+  const tog = document.getElementById('spotifyToggle');
+  if (tog.checked !== on) tog.checked = on;
+}
+function toggleSpotify(el) {
+  const desired = el.checked;
+  el.disabled = true;
+  api('/spotify', { enabled: desired })
+    .then(d => {
+      updateSpotifyUI(d.spotify_on);
+      toast(d.spotify_on ? 'Spotify enabled — radio stopped' : 'Spotify disabled — radio started');
+    })
+    .catch(() => {
+      el.checked = !desired;
+      toast('Spotify toggle failed', true);
+    })
+    .finally(() => { el.disabled = false; });
+}
+
 // ── Poll every 8 s ──
 function poll() {
   fetch('/status').then(r => r.json()).then(d => {
     updateNP(d.state, d.buffer);
     updateSvc(d.svc_status);
     updateBuffer(d.buffer);
+    if (typeof d.spotify_on === 'boolean') updateSpotifyUI(d.spotify_on);
   }).catch(() => {});
 }
 setInterval(poll, 8000);
@@ -1029,6 +1112,7 @@ def dashboard():
         state=playback_state(),
         svc_status=service_status(),
         buf=buffer_info(),
+        spotify_on=spotify_active(),
     )
 
 
@@ -1079,7 +1163,31 @@ def get_status():
         "svc_status": service_status(),
         "state":      playback_state(),
         "buffer":     buffer_info(),
+        "spotify_on": spotify_active(),
     })
+
+
+@app.route("/spotify", methods=["POST"])
+def set_spotify():
+    """Toggle Spotify Connect (raspotify).
+
+    Enable  → stop + disable radio.service, enable + start raspotify.
+    Disable → stop + disable raspotify, enable + start radio.service.
+    Only one of the two owns the ALSA device at any time.
+    """
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    enabled = bool(request.get_json(force=True).get("enabled", False))
+    try:
+        if enabled:
+            subprocess.run(["systemctl", "disable", "--now", "radio.service"], timeout=15)
+            subprocess.run(["systemctl", "enable",  "--now", "raspotify.service"], timeout=15)
+        else:
+            subprocess.run(["systemctl", "disable", "--now", "raspotify.service"], timeout=15)
+            subprocess.run(["systemctl", "enable",  "--now", "radio.service"], timeout=15)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, "spotify_on": spotify_active()})
 
 
 @app.route("/mode", methods=["POST"])
