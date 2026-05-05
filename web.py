@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "buffer_minutes": 120,
     "check_interval": 10,
     "volume": 90,
+    "buffer_enabled": True,
     "streams": [
         {"name": "Example Stream", "url": "https://findyourownstream.example/stream"}
     ],
@@ -63,6 +64,7 @@ def write_shell_config(cfg):
         f.write(f'MAX_CHUNKS=$(( BUFFER_MINUTES * 60 / CHUNK_SECONDS ))\n')
         f.write(f'CHECK_INTERVAL={cfg["check_interval"]}\n')
         f.write(f'VOLUME={cfg["volume"]}\n')
+        f.write(f'BUFFER_ENABLED={1 if cfg.get("buffer_enabled", True) else 0}\n')
 
 
 def service_status(unit="radio.service"):
@@ -273,6 +275,7 @@ MAIN_PAGE = """<!doctype html>
   .np-badge.buffer  { background: rgba(251,191,36,.12); color: var(--yellow); border: 1px solid rgba(251,191,36,.3); }
   .np-badge.forced  { background: rgba(251,191,36,.12); color: var(--yellow); border: 1px solid rgba(251,191,36,.3); }
   .np-badge.starting{ background: rgba(251,146,60,.12); color: var(--orange); border: 1px solid rgba(251,146,60,.3); }
+  .np-badge.waiting { background: rgba(251,146,60,.12); color: var(--orange); border: 1px solid rgba(251,146,60,.3); }
   .np-badge.unknown, .np-badge.stopped {
     background: rgba(248,113,113,.12); color: var(--red); border: 1px solid rgba(248,113,113,.3);
   }
@@ -470,6 +473,17 @@ MAIN_PAGE = """<!doctype html>
   }
   .pin-row input:focus { border-color: var(--accent-light); }
 
+  /* Buffer card with header toggle */
+  .card-head-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 1rem; gap: 1rem;
+  }
+  .card-head-row .card-title { margin-bottom: 0; }
+  .buffer-disabled { opacity: .45; pointer-events: none; }
+  .buffer-status { font-size: .72rem; color: var(--muted); margin-bottom: .75rem; }
+  .buffer-status .on  { color: var(--green); font-weight: 700; }
+  .buffer-status .off { color: var(--yellow); font-weight: 700; }
+
   /* Spotify toggle */
   .spotify-card {
     display: flex; align-items: center; justify-content: space-between;
@@ -564,12 +578,14 @@ MAIN_PAGE = """<!doctype html>
       <div class="np-title" id="npTitle">
         {% if state.mode in ('live', 'starting') %}{{ state.name or state.url }}
         {% elif state.mode in ('buffer', 'forced') %}Buffer Playback
+        {% elif state.mode == 'waiting' %}Waiting for Stream
         {% else %}—{% endif %}
       </div>
       <div class="np-subtitle" id="npSubtitle">
         {% if state.mode in ('live', 'starting') %}{{ state.url }}
         {% elif state.mode in ('buffer', 'forced') %}
           {{ buf.chunk_count }} chunks &middot; {{ (buf.covers_seconds // 60) }} min &middot; {{ '%.1f' % (buf.total_bytes / 1048576) }} MB on disk
+        {% elif state.mode == 'waiting' %}{{ state.url }}
         {% endif %}
       </div>
       <div class="svc-row">
@@ -577,11 +593,13 @@ MAIN_PAGE = """<!doctype html>
         <span class="svc-label" id="svcLabel">radio.service — {{ svc_status }}</span>
       </div>
       {% if state.mode in ('buffer', 'forced') %}
-      <button class="btn-mode to-live" id="modeBtn" onclick="switchMode('live')">
+      <button class="btn-mode to-live" id="modeBtn" onclick="switchMode('live')"
+              {% if not buffer_enabled %}style="display:none"{% endif %}>
         ↑ Resume Live Stream
       </button>
       {% else %}
-      <button class="btn-mode to-buffer" id="modeBtn" onclick="switchMode('buffer')">
+      <button class="btn-mode to-buffer" id="modeBtn" onclick="switchMode('buffer')"
+              {% if not buffer_enabled %}style="display:none"{% endif %}>
         ↓ Switch to Buffer
       </button>
       {% endif %}
@@ -642,7 +660,19 @@ MAIN_PAGE = """<!doctype html>
 
     <!-- 4. Buffer -->
     <div class="card">
-      <div class="card-title">📼 Buffer</div>
+      <div class="card-head-row">
+        <div class="card-title">📼 Buffer</div>
+        <label class="switch" title="Disable to play only the live stream — no recording, no failover">
+          <input type="checkbox" id="bufferToggle" {% if buffer_enabled %}checked{% endif %}
+                 onchange="toggleBuffer(this)">
+          <span class="slider-bg"></span>
+        </label>
+      </div>
+      <div class="buffer-status" id="bufferStatus">
+        {% if buffer_enabled %}<span class="on">Enabled</span> — recording and failover active
+        {% else %}<span class="off">Disabled</span> — live stream only, no failover{% endif %}
+      </div>
+      <div id="bufferBody" class="{% if not buffer_enabled %}buffer-disabled{% endif %}">
       <div class="buf-stats">
         <div class="buf-stat">
           <span class="buf-stat-val" id="bChunks">{{ buf.chunk_count }}</span>
@@ -682,6 +712,7 @@ MAIN_PAGE = """<!doctype html>
         </table>
       </div>
       <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
+      </div><!-- /bufferBody -->
     </div>
 
     <!-- 5. Recording Settings (chunk/buffer/interval) -->
@@ -889,6 +920,9 @@ function updateNP(state, buf) {
     const mins = Math.floor((buf.covers_seconds || 0) / 60);
     const mb   = ((buf.total_bytes || 0) / 1048576).toFixed(1);
     subtitleEl.textContent = `${buf.chunk_count} chunks · ${mins} min · ${mb} MB on disk`;
+  } else if (state.mode === 'waiting') {
+    titleEl.textContent    = 'Waiting for Stream';
+    subtitleEl.textContent = state.url || '';
   } else {
     titleEl.textContent = '—'; subtitleEl.textContent = '';
   }
@@ -933,6 +967,38 @@ function updateBuffer(buf) {
   ).join('');
 }
 
+// ── Buffer toggle ──
+let bufferEnabled = {{ 'true' if buffer_enabled else 'false' }};
+function updateBufferEnabledUI(on) {
+  bufferEnabled = on;
+  const body = document.getElementById('bufferBody');
+  body.classList.toggle('buffer-disabled', !on);
+  const status = document.getElementById('bufferStatus');
+  status.innerHTML = on
+    ? '<span class="on">Enabled</span> — recording and failover active'
+    : '<span class="off">Disabled</span> — live stream only, no failover';
+  const tog = document.getElementById('bufferToggle');
+  if (tog.checked !== on) tog.checked = on;
+  // Hide the "Switch to Buffer" mode button when buffer is disabled.
+  const modeBtn = document.getElementById('modeBtn');
+  if (modeBtn) modeBtn.style.display = on ? '' : 'none';
+}
+function toggleBuffer(el) {
+  const desired = el.checked;
+  el.disabled = true;
+  api('/buffer/enable', { enabled: desired })
+    .then(d => {
+      updateBufferEnabledUI(d.buffer_enabled);
+      toast(d.buffer_enabled ? 'Buffer enabled — recording resumed' : 'Buffer disabled — live only');
+    })
+    .catch(() => {
+      el.checked = !desired;
+      toast('Buffer toggle failed', true);
+    })
+    .finally(() => { el.disabled = false; });
+}
+updateBufferEnabledUI(bufferEnabled);
+
 // ── Spotify toggle ──
 function updateSpotifyUI(on) {
   const sub = document.getElementById('spotifySub');
@@ -964,6 +1030,9 @@ function poll() {
     updateSvc(d.svc_status);
     updateBuffer(d.buffer);
     if (typeof d.spotify_on === 'boolean') updateSpotifyUI(d.spotify_on);
+    if (typeof d.buffer_enabled === 'boolean' && d.buffer_enabled !== bufferEnabled) {
+      updateBufferEnabledUI(d.buffer_enabled);
+    }
   }).catch(() => {});
 }
 setInterval(poll, 8000);
@@ -1113,6 +1182,7 @@ def dashboard():
         svc_status=service_status(),
         buf=buffer_info(),
         spotify_on=spotify_active(),
+        buffer_enabled=bool(cfg.get("buffer_enabled", True)),
     )
 
 
@@ -1159,12 +1229,38 @@ def stream_logs():
 def get_status():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
+    cfg = load_config()
     return jsonify({
-        "svc_status": service_status(),
-        "state":      playback_state(),
-        "buffer":     buffer_info(),
-        "spotify_on": spotify_active(),
+        "svc_status":     service_status(),
+        "state":          playback_state(),
+        "buffer":         buffer_info(),
+        "spotify_on":     spotify_active(),
+        "buffer_enabled": bool(cfg.get("buffer_enabled", True)),
     })
+
+
+@app.route("/buffer/enable", methods=["POST"])
+def toggle_buffer():
+    """Enable/disable the rolling buffer.
+
+    When disabled, radio.sh skips recording and skips failover playback —
+    it simply retries the live stream. Live audio continues uninterrupted
+    if the stream is currently up.
+    """
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    enabled = bool(request.get_json(force=True).get("enabled", True))
+    cfg = load_config()
+    cfg["buffer_enabled"] = enabled
+    save_config(cfg)
+    # Clear any forced-buffer flag — it'd be ignored anyway with buffer off.
+    if not enabled:
+        try:
+            os.remove(FORCE_BUFFER)
+        except FileNotFoundError:
+            pass
+    subprocess.run(["systemctl", "restart", "radio.service"], timeout=10)
+    return jsonify({"ok": True, "buffer_enabled": enabled})
 
 
 @app.route("/spotify", methods=["POST"])

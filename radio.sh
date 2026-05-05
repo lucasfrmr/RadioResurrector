@@ -15,6 +15,9 @@ CHUNK_SECONDS="${CHUNK_SECONDS:-300}"
 BUFFER_MINUTES="${BUFFER_MINUTES:-120}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-10}"
 VOLUME="${VOLUME:-90}"
+# When 0, no chunks are recorded and stream outages do not fall back to
+# cached audio — the loop just retries the live URL.
+BUFFER_ENABLED="${BUFFER_ENABLED:-1}"
 
 BUFFER_DIR="/opt/radio/buffer"
 STATE_FILE="/opt/radio/state.json"
@@ -88,18 +91,30 @@ play_buffer() {
 
 # -------- Main loop --------
 write_state "starting"
-record_stream &
-REC_PID=$!
-echo "[radio] Recorder PID: $REC_PID"
+
+if [[ "$BUFFER_ENABLED" == "1" ]]; then
+  record_stream &
+  REC_PID=$!
+  echo "[radio] Recorder PID: $REC_PID (buffer enabled)"
+else
+  echo "[radio] Buffer disabled — recorder not started, no failover."
+fi
 
 while true; do
-  prune_buffer
+  if [[ "$BUFFER_ENABLED" == "1" ]]; then
+    prune_buffer
+  fi
 
-  if [[ ! -f "$FORCE_BUFFER" ]] && stream_ok; then
+  # When the buffer is disabled, FORCE_BUFFER is meaningless — skip it.
+  if { [[ "$BUFFER_ENABLED" != "1" ]] || [[ ! -f "$FORCE_BUFFER" ]]; } && stream_ok; then
     echo "[radio] Stream OK — playing live."
     write_state "live"
     $PLAYER "$STREAM_URL"
     echo "[radio] mpv exited; rechecking..."
+  elif [[ "$BUFFER_ENABLED" != "1" ]]; then
+    # Buffer disabled and stream is down — wait and retry, no fallback playback.
+    echo "[radio] Stream DOWN — buffer disabled, waiting $CHECK_INTERVAL s..."
+    write_state "waiting"
   else
     if [[ -f "$FORCE_BUFFER" ]]; then
       echo "[radio] Force buffer mode active."
