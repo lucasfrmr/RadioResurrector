@@ -40,7 +40,7 @@ The default PIN is **1234** — change it immediately from the dashboard.
 |---|---|
 | **Volume** | Live slider — updates the audio level instantly |
 | **Stream URL** | Paste any stream URL, or choose a saved preset |
-| **MP3 Player** | Optional fallback that loops every `.mp3` in `/opt/radio/mp3` |
+| **MP3 Player** | Upload, delete, order, and control fallback tracks in `/opt/radio/mp3` |
 | **Check Interval** | How often to test the live stream (5–60 s) |
 | **Apply & Restart** | Saves all settings and restarts the radio service |
 | **Start / Restart / Stop** | Direct service controls |
@@ -68,7 +68,7 @@ To simulate an internet outage:
 sudo ip route add blackhole 0.0.0.0/0
 ```
 
-When the MP3 player is enabled and `/opt/radio/mp3` contains MP3 files, the Pi should begin looping those files. The MP3 player is disabled by default and remains disabled when the folder is empty.
+When the MP3 player is enabled and `/opt/radio/mp3` contains MP3 files, the Pi should begin looping those files in the order set in the dashboard. The MP3 player is disabled by default and remains disabled when the folder is empty.
 Restore the connection:
 ```bash
 sudo ip route del blackhole 0.0.0.0/0

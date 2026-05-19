@@ -4,10 +4,12 @@
 import json
 import os
 import secrets
+import socket
 import subprocess
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
+from werkzeug.utils import secure_filename
 
 # Set RADIO_DIR env var to run locally, e.g.:
 #   RADIO_DIR=/tmp/radio python3 web.py
@@ -16,8 +18,10 @@ CONFIG_FILE      = os.path.join(BASE_DIR, "config.json")
 CONFIG_SH        = os.path.join(BASE_DIR, "config.sh")
 BUFFER_DIR       = os.path.join(BASE_DIR, "buffer")
 MP3_PLAYER_DIR   = os.path.join(BASE_DIR, "mp3")
+MP3_ORDER_FILE   = os.path.join(BASE_DIR, "mp3_order.m3u")
 STATE_FILE       = os.path.join(BASE_DIR, "state.json")
 FORCE_BUFFER     = os.path.join(BASE_DIR, "force_buffer")
+MPV_SOCKET       = "/tmp/radio-mpv.sock"
 
 os.makedirs(BUFFER_DIR, exist_ok=True)  # ensure dirs exist in dev too
 os.makedirs(MP3_PLAYER_DIR, exist_ok=True)
@@ -34,6 +38,7 @@ DEFAULT_CONFIG = {
     "volume": 90,
     "buffer_enabled": False,
     "mp3_player_dir": MP3_PLAYER_DIR,
+    "mp3_order": [],
     "streams": [
         {"name": "Example Stream", "url": "https://findyourownstream.example/stream"}
     ],
@@ -60,6 +65,7 @@ def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
     write_shell_config(cfg)
+    write_mp3_playlist(cfg)
 
 
 def write_shell_config(cfg):
@@ -73,6 +79,68 @@ def write_shell_config(cfg):
         f.write(f'VOLUME={cfg["volume"]}\n')
         f.write(f'BUFFER_ENABLED={1 if cfg.get("buffer_enabled", False) else 0}\n')
         f.write(f'MP3_PLAYER_DIR="{cfg.get("mp3_player_dir", MP3_PLAYER_DIR)}"\n')
+        f.write(f'MP3_ORDER_FILE="{MP3_ORDER_FILE}"\n')
+        f.write(f'MPV_SOCKET="{MPV_SOCKET}"\n')
+
+
+def mp3_names(mp3_dir):
+    try:
+        return sorted(f for f in os.listdir(mp3_dir) if f.lower().endswith(".mp3"))
+    except Exception:
+        return []
+
+
+def ordered_mp3_names(cfg, files=None):
+    mp3_dir = cfg.get("mp3_player_dir", MP3_PLAYER_DIR)
+    files = mp3_names(mp3_dir) if files is None else files
+    available = set(files)
+    ordered = []
+    for name in cfg.get("mp3_order", []):
+        if name in available and name not in ordered:
+            ordered.append(name)
+    ordered.extend(name for name in files if name not in ordered)
+    return ordered
+
+
+def write_mp3_playlist(cfg):
+    mp3_dir = cfg.get("mp3_player_dir", MP3_PLAYER_DIR)
+    ordered = ordered_mp3_names(cfg)
+    with open(MP3_ORDER_FILE, "w") as f:
+        for name in ordered:
+            f.write(os.path.join(mp3_dir, name) + "\n")
+
+
+def unique_mp3_name(mp3_dir, filename):
+    root, ext = os.path.splitext(secure_filename(filename))
+    if ext.lower() != ".mp3":
+        return None
+    root = root or "track"
+    candidate = f"{root}.mp3"
+    counter = 1
+    while os.path.exists(os.path.join(mp3_dir, candidate)):
+        candidate = f"{root}-{counter}.mp3"
+        counter += 1
+    return candidate
+
+
+def mp3_file_path(cfg, name):
+    mp3_dir = os.path.abspath(cfg.get("mp3_player_dir", MP3_PLAYER_DIR))
+    clean = os.path.basename(str(name))
+    if clean != name or not clean.lower().endswith(".mp3"):
+        return None
+    path = os.path.abspath(os.path.join(mp3_dir, clean))
+    if os.path.dirname(path) != mp3_dir:
+        return None
+    return path
+
+
+def mpv_command(command):
+    payload = json.dumps({"command": command}) + "\n"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(2)
+        sock.connect(MPV_SOCKET)
+        sock.sendall(payload.encode())
+        return sock.recv(4096).decode(errors="replace")
 
 
 def service_status(unit="radio.service"):
@@ -121,11 +189,7 @@ def playback_state():
 def buffer_info():
     cfg = load_config()
     mp3_dir = cfg.get("mp3_player_dir", MP3_PLAYER_DIR)
-
-    try:
-        files = sorted(f for f in os.listdir(mp3_dir) if f.lower().endswith(".mp3"))
-    except Exception:
-        files = []
+    files = ordered_mp3_names(cfg)
 
     file_details = []
     total_bytes  = 0
@@ -488,10 +552,17 @@ MAIN_PAGE = """<!doctype html>
     margin-bottom: 1rem; gap: 1rem;
   }
   .card-head-row .card-title { margin-bottom: 0; }
-  .buffer-disabled { opacity: .45; pointer-events: none; }
+  .buffer-disabled { opacity: .75; }
   .buffer-status { font-size: .72rem; color: var(--muted); margin-bottom: .75rem; }
   .buffer-status .on  { color: var(--green); font-weight: 700; }
   .buffer-status .off { color: var(--yellow); font-weight: 700; }
+  .mp3-actions { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .file-input { display: none; }
+  .track-actions { display: flex; gap: .35rem; justify-content: flex-end; }
+  .btn-icon {
+    width: 1.8rem; height: 1.8rem; padding: 0; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
 
   /* Spotify toggle */
   .spotify-card {
@@ -704,15 +775,28 @@ MAIN_PAGE = """<!doctype html>
         <span id="fillLabel">{{ buf.chunk_count }} MP3 tracks</span>
         <span id="fillPct">{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%</span>
       </div>
+      <div class="mp3-actions">
+        <input class="file-input" type="file" id="mp3Upload" accept=".mp3,audio/mpeg" multiple onchange="uploadMp3s(this)">
+        <button class="btn btn-primary btn-sm" onclick="document.getElementById('mp3Upload').click()">Upload MP3s</button>
+        <button class="btn btn-ghost btn-sm" onclick="playerControl('pause')">Pause</button>
+        <button class="btn btn-ghost btn-sm" onclick="playerControl('play')">Play</button>
+        <button class="btn btn-ghost btn-sm" onclick="playerControl('next')">Next</button>
+      </div>
       <div class="chunk-list-wrap">
         <table class="chunk-list">
-          <thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead>
+          <thead><tr><th>File</th><th>Size</th><th>Order</th></tr></thead>
           <tbody id="chunkTable">
-            {% for f in buf.files | reverse %}
+            {% for f in buf.files %}
             <tr>
               <td>{{ f.name }}</td>
               <td class="dim">{{ '%.1f' % (f.size / 1048576) }} MB</td>
-              <td class="dim right" data-ts="{{ f.mtime }}">—</td>
+              <td class="right">
+                <div class="track-actions">
+                  <button class="btn btn-ghost btn-icon" onclick='moveTrack({{ f.name|tojson }}, -1)' title="Move up">↑</button>
+                  <button class="btn btn-ghost btn-icon" onclick='moveTrack({{ f.name|tojson }}, 1)' title="Move down">↓</button>
+                  <button class="btn btn-danger btn-icon" onclick='deleteTrack({{ f.name|tojson }})' title="Delete">×</button>
+                </div>
+              </td>
             </tr>
             {% else %}
             <tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No MP3 files</td></tr>
@@ -720,7 +804,6 @@ MAIN_PAGE = """<!doctype html>
           </tbody>
         </table>
       </div>
-      <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear MP3 Folder</button>
       </div><!-- /bufferBody -->
     </div>
 
@@ -783,18 +866,6 @@ MAIN_PAGE = """<!doctype html>
 
 </div><!-- /dashboard-grid -->
 
-</div>
-
-<!-- Clear MP3 folder confirmation -->
-<div class="overlay" id="clearOverlay">
-  <div class="dialog">
-    <h2>Clear MP3 folder?</h2>
-    <p>Deletes all MP3 files in the fallback folder. If the live stream is down, playback will stop until files are added again.</p>
-    <div class="btn-row">
-      <button class="btn btn-ghost" onclick="closeClear()">Cancel</button>
-      <button class="btn btn-danger" onclick="doClear()">Clear</button>
-    </div>
-  </div>
 </div>
 
 <div id="toast"></div>
@@ -938,6 +1009,7 @@ function updateSvc(status) {
 }
 
 function updateBuffer(buf) {
+  window.mp3Order = (buf.files || []).map(f => f.name);
   document.getElementById('bChunks').textContent = buf.chunk_count;
   document.getElementById('bCovers').textContent = 'mp3';
   document.getElementById('bSize').textContent   = (buf.total_bytes/1048576).toFixed(1) + 'MB';
@@ -952,11 +1024,58 @@ function updateBuffer(buf) {
     tbody.innerHTML = '<tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No MP3 files</td></tr>';
     return;
   }
-  tbody.innerHTML = [...buf.files].reverse().map(f =>
+  tbody.innerHTML = buf.files.map(f =>
     `<tr><td>${esc(f.name)}</td>
      <td class="dim">${(f.size/1048576).toFixed(1)} MB</td>
-     <td class="dim right" data-ts="${f.mtime}">${relTime(f.mtime)}</td></tr>`
+     <td class="right"><div class="track-actions">
+       <button class="btn btn-ghost btn-icon" onclick='moveTrack(${JSON.stringify(f.name)}, -1)' title="Move up">↑</button>
+       <button class="btn btn-ghost btn-icon" onclick='moveTrack(${JSON.stringify(f.name)}, 1)' title="Move down">↓</button>
+       <button class="btn btn-danger btn-icon" onclick='deleteTrack(${JSON.stringify(f.name)})' title="Delete">×</button>
+     </div></td></tr>`
   ).join('');
+}
+
+window.mp3Order = {{ buf.files | map(attribute='name') | list | tojson }};
+
+function refreshMp3Payload(d) {
+  if (d.buffer) updateBuffer(d.buffer);
+  if (typeof d.buffer_enabled === 'boolean') updateBufferEnabledUI(d.buffer_enabled);
+}
+
+function uploadMp3s(input) {
+  const files = Array.from(input.files || []);
+  if (!files.length) return;
+  const data = new FormData();
+  files.forEach(file => data.append('files', file));
+  input.disabled = true;
+  fetch('/mp3/upload', { method: 'POST', body: data })
+    .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)))
+    .then(d => { refreshMp3Payload(d); toast('MP3 upload complete'); })
+    .catch(e => toast(e.error || 'MP3 upload failed', true))
+    .finally(() => { input.value = ''; input.disabled = false; });
+}
+
+function deleteTrack(name) {
+  api('/mp3/delete', { name })
+    .then(d => { refreshMp3Payload(d); toast('MP3 deleted'); })
+    .catch(() => toast('Delete failed', true));
+}
+
+function moveTrack(name, direction) {
+  const order = [...(window.mp3Order || [])];
+  const idx = order.indexOf(name);
+  const next = idx + direction;
+  if (idx < 0 || next < 0 || next >= order.length) return;
+  [order[idx], order[next]] = [order[next], order[idx]];
+  api('/mp3/order', { files: order })
+    .then(d => { refreshMp3Payload(d); toast('Order saved'); })
+    .catch(() => toast('Order update failed', true));
+}
+
+function playerControl(action) {
+  api('/player/' + action, {})
+    .then(() => toast(action === 'next' ? 'Skipping track' : action === 'pause' ? 'Paused' : 'Playing'))
+    .catch(() => toast('Player command unavailable', true));
 }
 
 // ── Buffer toggle ──
@@ -1062,16 +1181,6 @@ function serviceAction(action) {
   api('/service/' + action, {})
     .then(d => { toast('Service ' + action + 'ed'); updateSvc(d.status); })
     .catch(() => toast('Service action failed', true));
-}
-
-// ── Clear MP3 folder ──
-function confirmClear() { document.getElementById('clearOverlay').classList.add('open'); }
-function closeClear()   { document.getElementById('clearOverlay').classList.remove('open'); }
-function doClear() {
-  closeClear();
-  api('/buffer/clear', {})
-    .then(d => { toast('MP3 folder cleared'); updateBuffer(d.buffer); updateBufferEnabledUI(d.buffer_enabled); })
-    .catch(() => toast('Failed to clear MP3 folder', true));
 }
 
 // ── Presets ──
@@ -1347,21 +1456,109 @@ def service_action(action):
 def clear_buffer():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
+    return jsonify({"error": "Use per-track delete from the MP3 manager"}), 410
+
+
+@app.route("/mp3/upload", methods=["POST"])
+def upload_mp3():
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
     cfg = load_config()
     mp3_dir = cfg.get("mp3_player_dir", MP3_PLAYER_DIR)
+    os.makedirs(mp3_dir, exist_ok=True)
+    uploads = request.files.getlist("files")
+    saved = []
+    for item in uploads:
+        if not item or not item.filename:
+            continue
+        name = unique_mp3_name(mp3_dir, item.filename)
+        if name is None:
+            continue
+        item.save(os.path.join(mp3_dir, name))
+        saved.append(name)
+    if not saved:
+        return jsonify({"error": "No MP3 files uploaded"}), 400
+    order = ordered_mp3_names(cfg)
+    order.extend(name for name in saved if name not in order)
+    cfg["mp3_order"] = order
+    save_config(cfg)
+    buf = buffer_info()
+    return jsonify({
+        "ok": True,
+        "saved": saved,
+        "buffer": buf,
+        "buffer_enabled": bool(cfg.get("buffer_enabled", False)) and buf["available"],
+    })
+
+
+@app.route("/mp3/delete", methods=["POST"])
+def delete_mp3():
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    cfg = load_config()
+    name = str(request.get_json(force=True).get("name", ""))
+    path = mp3_file_path(cfg, name)
+    if path is None or not os.path.exists(path):
+        return jsonify({"error": "MP3 not found"}), 404
+    os.remove(path)
+    cfg["mp3_order"] = [track for track in cfg.get("mp3_order", []) if track != name]
+    if not ordered_mp3_names(cfg):
+        cfg["buffer_enabled"] = False
+        try:
+            os.remove(FORCE_BUFFER)
+        except FileNotFoundError:
+            pass
+    save_config(cfg)
+    buf = buffer_info()
+    return jsonify({
+        "ok": True,
+        "buffer": buf,
+        "buffer_enabled": bool(cfg.get("buffer_enabled", False)) and buf["available"],
+    })
+
+
+@app.route("/mp3/order", methods=["POST"])
+def order_mp3():
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    cfg = load_config()
+    mp3_dir = cfg.get("mp3_player_dir", MP3_PLAYER_DIR)
+    existing = mp3_names(mp3_dir)
+    available = set(existing)
+    requested = request.get_json(force=True).get("files", [])
+    ordered = []
+    for name in requested:
+        if name in available and name not in ordered:
+            ordered.append(name)
+    ordered.extend(name for name in existing if name not in ordered)
+    cfg["mp3_order"] = ordered
+    save_config(cfg)
+    buf = buffer_info()
+    return jsonify({
+        "ok": True,
+        "buffer": buf,
+        "buffer_enabled": bool(cfg.get("buffer_enabled", False)) and buf["available"],
+    })
+
+
+@app.route("/player/<action>", methods=["POST"])
+def player_action(action):
+    if not require_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    commands = {
+        "pause": ["set_property", "pause", True],
+        "play": ["set_property", "pause", False],
+        "next": ["playlist-next", "force"],
+    }
+    if action not in commands:
+        return jsonify({"error": "invalid action"}), 400
     try:
-        for name in os.listdir(mp3_dir):
-            if name.lower().endswith(".mp3") or name.lower().endswith(".m3u"):
-                os.remove(os.path.join(mp3_dir, name))
+        response = mpv_command(commands[action])
+    except FileNotFoundError:
+        return jsonify({"error": "mpv is not accepting commands"}), 409
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    cfg["buffer_enabled"] = False
-    save_config(cfg)
-    try:
-        os.remove(FORCE_BUFFER)
-    except FileNotFoundError:
-        pass
-    return jsonify({"ok": True, "buffer": buffer_info(), "buffer_enabled": False})
+    return jsonify({"ok": True, "response": response})
 
 
 @app.route("/presets/add", methods=["POST"])

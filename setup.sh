@@ -161,6 +161,7 @@ cfg = {
     "volume":         90,
     "buffer_enabled": False,
     "mp3_player_dir": os.path.join(os.environ["INSTALL_DIR"], "mp3"),
+    "mp3_order": [],
     "streams": [
         {"name": os.environ["STREAM_NAME"], "url": os.environ["STREAM_URL"]},
     ],
@@ -181,6 +182,8 @@ CHECK_INTERVAL=10
 VOLUME=90
 BUFFER_ENABLED=0
 MP3_PLAYER_DIR="$INSTALL_DIR/mp3"
+MP3_ORDER_FILE="$INSTALL_DIR/mp3_order.m3u"
+MPV_SOCKET="/tmp/radio-mpv.sock"
 EOF
 
   chown "$RADIO_USER":"$RADIO_USER" "$INSTALL_DIR/config.json" "$INSTALL_DIR/config.sh"
@@ -197,6 +200,7 @@ install_dir = os.environ["INSTALL_DIR"]
 config_json = os.path.join(install_dir, "config.json")
 config_sh = os.path.join(install_dir, "config.sh")
 mp3_dir = os.path.join(install_dir, "mp3")
+mp3_order_file = os.path.join(install_dir, "mp3_order.m3u")
 
 if os.path.exists(config_json):
     with open(config_json) as f:
@@ -219,6 +223,16 @@ if "mp3_player_dir" not in cfg:
     cfg["buffer_enabled"] = False
 cfg.setdefault("buffer_enabled", False)
 cfg.setdefault("mp3_player_dir", mp3_dir)
+cfg.setdefault("mp3_order", [])
+
+files = sorted(name for name in os.listdir(mp3_dir) if name.lower().endswith(".mp3"))
+available = set(files)
+ordered = []
+for name in cfg.get("mp3_order", []):
+    if name in available and name not in ordered:
+        ordered.append(name)
+ordered.extend(name for name in files if name not in ordered)
+cfg["mp3_order"] = ordered
 
 with open(config_json, "w") as f:
     json.dump(cfg, f, indent=2)
@@ -233,9 +247,16 @@ with open(config_sh, "w") as f:
     f.write(f'VOLUME={cfg.get("volume", 90)}\n')
     f.write(f'BUFFER_ENABLED={1 if cfg.get("buffer_enabled", False) else 0}\n')
     f.write(f'MP3_PLAYER_DIR="{cfg.get("mp3_player_dir", mp3_dir)}"\n')
+    f.write(f'MP3_ORDER_FILE="{mp3_order_file}"\n')
+    f.write('MPV_SOCKET="/tmp/radio-mpv.sock"\n')
+
+with open(mp3_order_file, "w") as f:
+    for name in ordered:
+        f.write(os.path.join(cfg.get("mp3_player_dir", mp3_dir), name) + "\n")
 PY
 chown "$RADIO_USER":"$RADIO_USER" "$INSTALL_DIR/config.json" "$INSTALL_DIR/config.sh"
-chmod 644 "$INSTALL_DIR/config.json" "$INSTALL_DIR/config.sh"
+chown "$RADIO_USER":"$RADIO_USER" "$INSTALL_DIR/mp3_order.m3u"
+chmod 644 "$INSTALL_DIR/config.json" "$INSTALL_DIR/config.sh" "$INSTALL_DIR/mp3_order.m3u"
 success "MP3 player config defaults ready"
 
 # ── 5. Enable & start ────────────────────────────────────────────────────────

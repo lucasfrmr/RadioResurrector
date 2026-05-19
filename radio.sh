@@ -18,10 +18,12 @@ VOLUME="${VOLUME:-90}"
 # When 0, stream outages do not fall back to local MP3 playback.
 BUFFER_ENABLED="${BUFFER_ENABLED:-0}"
 MP3_PLAYER_DIR="${MP3_PLAYER_DIR:-/opt/radio/mp3}"
+MP3_ORDER_FILE="${MP3_ORDER_FILE:-/opt/radio/mp3_order.m3u}"
+MPV_SOCKET="${MPV_SOCKET:-/tmp/radio-mpv.sock}"
 
 STATE_FILE="/opt/radio/state.json"
 FORCE_BUFFER="/opt/radio/force_buffer"   # touch this file to force buffer mode
-PLAYER="mpv --no-video --quiet --volume=${VOLUME} --audio-device=alsa --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
+PLAYER="mpv --no-video --quiet --volume=${VOLUME} --audio-device=alsa --input-ipc-server=${MPV_SOCKET} --user-agent='Mozilla/5.0' --no-ytdl --network-timeout=8"
 
 mkdir -p "$MP3_PLAYER_DIR"
 
@@ -78,10 +80,22 @@ play_buffer() {
   fi
 
   playlist="$(mktemp /tmp/radio-mp3-player.XXXXXX.m3u)"
-  find "$MP3_PLAYER_DIR" -maxdepth 1 -type f -iname '*.mp3' | sort > "$playlist"
+  if [[ -f "$MP3_ORDER_FILE" ]]; then
+    while IFS= read -r track; do
+      if [[ -f "$track" && "${track,,}" == *.mp3 ]]; then
+        printf '%s\n' "$track" >> "$playlist"
+      fi
+    done < "$MP3_ORDER_FILE"
+  fi
+  while IFS= read -r track; do
+    if ! grep -Fxq "$track" "$playlist" 2>/dev/null; then
+      printf '%s\n' "$track" >> "$playlist"
+    fi
+  done < <(find "$MP3_PLAYER_DIR" -maxdepth 1 -type f -iname '*.mp3' | sort)
 
   echo "[radio] Playing MP3 folder on loop: $MP3_PLAYER_DIR"
-  mpv --no-video --quiet --volume="${VOLUME}" --loop-playlist=inf --audio-device=alsa --playlist="$playlist" &
+  rm -f "$MPV_SOCKET"
+  mpv --no-video --quiet --volume="${VOLUME}" --loop-playlist=inf --audio-device=alsa --input-ipc-server="$MPV_SOCKET" --playlist="$playlist" &
   MPV_PID=$!
   start_watcher "$MPV_PID"
   wait "$MPV_PID"
@@ -103,6 +117,7 @@ while true; do
   if { [[ "$BUFFER_ENABLED" != "1" ]] || ! mp3_files_available || [[ ! -f "$FORCE_BUFFER" ]]; } && stream_ok; then
     echo "[radio] Stream OK — playing live."
     write_state "live"
+    rm -f "$MPV_SOCKET"
     $PLAYER "$STREAM_URL"
     echo "[radio] mpv exited; rechecking..."
   elif [[ "$BUFFER_ENABLED" != "1" ]] || ! mp3_files_available; then
