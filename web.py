@@ -15,10 +15,12 @@ BASE_DIR         = os.environ.get("RADIO_DIR", "/opt/radio")
 CONFIG_FILE      = os.path.join(BASE_DIR, "config.json")
 CONFIG_SH        = os.path.join(BASE_DIR, "config.sh")
 BUFFER_DIR       = os.path.join(BASE_DIR, "buffer")
+MP3_PLAYER_DIR   = os.path.join(BASE_DIR, "mp3")
 STATE_FILE       = os.path.join(BASE_DIR, "state.json")
 FORCE_BUFFER     = os.path.join(BASE_DIR, "force_buffer")
 
 os.makedirs(BUFFER_DIR, exist_ok=True)  # ensure dirs exist in dev too
+os.makedirs(MP3_PLAYER_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
@@ -30,7 +32,8 @@ DEFAULT_CONFIG = {
     "buffer_minutes": 120,
     "check_interval": 10,
     "volume": 90,
-    "buffer_enabled": True,
+    "buffer_enabled": False,
+    "mp3_player_dir": MP3_PLAYER_DIR,
     "streams": [
         {"name": "Example Stream", "url": "https://findyourownstream.example/stream"}
     ],
@@ -44,12 +47,16 @@ DEFAULT_CONFIG = {
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG
+        return dict(DEFAULT_CONFIG)
     with open(CONFIG_FILE) as f:
-        return json.load(f)
+        cfg = json.load(f)
+    merged = dict(DEFAULT_CONFIG)
+    merged.update(cfg)
+    return merged
 
 
 def save_config(cfg):
+    os.makedirs(cfg.get("mp3_player_dir", MP3_PLAYER_DIR), exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
     write_shell_config(cfg)
@@ -64,7 +71,8 @@ def write_shell_config(cfg):
         f.write(f'MAX_CHUNKS=$(( BUFFER_MINUTES * 60 / CHUNK_SECONDS ))\n')
         f.write(f'CHECK_INTERVAL={cfg["check_interval"]}\n')
         f.write(f'VOLUME={cfg["volume"]}\n')
-        f.write(f'BUFFER_ENABLED={1 if cfg.get("buffer_enabled", True) else 0}\n')
+        f.write(f'BUFFER_ENABLED={1 if cfg.get("buffer_enabled", False) else 0}\n')
+        f.write(f'MP3_PLAYER_DIR="{cfg.get("mp3_player_dir", MP3_PLAYER_DIR)}"\n')
 
 
 def service_status(unit="radio.service"):
@@ -112,11 +120,10 @@ def playback_state():
 
 def buffer_info():
     cfg = load_config()
-    chunk_seconds = cfg.get("chunk_seconds", 300)
-    max_chunks    = cfg.get("buffer_minutes", 120) * 60 // chunk_seconds
+    mp3_dir = cfg.get("mp3_player_dir", MP3_PLAYER_DIR)
 
     try:
-        files = sorted(f for f in os.listdir(BUFFER_DIR) if f.endswith(".mp3"))
+        files = sorted(f for f in os.listdir(mp3_dir) if f.lower().endswith(".mp3"))
     except Exception:
         files = []
 
@@ -126,7 +133,7 @@ def buffer_info():
     newest_ts    = None
 
     for name in files:
-        path = os.path.join(BUFFER_DIR, name)
+        path = os.path.join(mp3_dir, name)
         try:
             st = os.stat(path)
             sz, mt = st.st_size, int(st.st_mtime)
@@ -140,12 +147,14 @@ def buffer_info():
     return {
         "files":          file_details,
         "chunk_count":    len(file_details),
-        "max_chunks":     max_chunks,
-        "chunk_seconds":  chunk_seconds,
+        "max_chunks":     len(file_details),
+        "chunk_seconds":  0,
         "total_bytes":    total_bytes,
-        "covers_seconds": len(file_details) * chunk_seconds,
+        "covers_seconds": 0,
         "oldest_ts":      oldest_ts or 0,
         "newest_ts":      newest_ts or 0,
+        "folder":         mp3_dir,
+        "available":      bool(file_details),
     }
 
 
@@ -577,14 +586,14 @@ MAIN_PAGE = """<!doctype html>
       </div>
       <div class="np-title" id="npTitle">
         {% if state.mode in ('live', 'starting') %}{{ state.name or state.url }}
-        {% elif state.mode in ('buffer', 'forced') %}Buffer Playback
+        {% elif state.mode in ('buffer', 'forced') %}MP3 Folder Player
         {% elif state.mode == 'waiting' %}Waiting for Stream
         {% else %}—{% endif %}
       </div>
       <div class="np-subtitle" id="npSubtitle">
         {% if state.mode in ('live', 'starting') %}{{ state.url }}
         {% elif state.mode in ('buffer', 'forced') %}
-          {{ buf.chunk_count }} chunks &middot; {{ (buf.covers_seconds // 60) }} min &middot; {{ '%.1f' % (buf.total_bytes / 1048576) }} MB on disk
+          {{ buf.chunk_count }} tracks &middot; {{ '%.1f' % (buf.total_bytes / 1048576) }} MB &middot; {{ buf.folder }}
         {% elif state.mode == 'waiting' %}{{ state.url }}
         {% endif %}
       </div>
@@ -600,7 +609,7 @@ MAIN_PAGE = """<!doctype html>
       {% else %}
       <button class="btn-mode to-buffer" id="modeBtn" onclick="switchMode('buffer')"
               {% if not buffer_enabled %}style="display:none"{% endif %}>
-        ↓ Switch to Buffer
+        ↓ Switch to MP3 Player
       </button>
       {% endif %}
     </div>
@@ -658,29 +667,29 @@ MAIN_PAGE = """<!doctype html>
       </div>
     </div>
 
-    <!-- 4. Buffer -->
+    <!-- 4. MP3 Player -->
     <div class="card">
       <div class="card-head-row">
-        <div class="card-title">📼 Buffer</div>
-        <label class="switch" title="Disable to play only the live stream — no recording, no failover">
+        <div class="card-title">📼 MP3 Player</div>
+        <label class="switch" title="Disable to play only the live stream — no local MP3 fallback">
           <input type="checkbox" id="bufferToggle" {% if buffer_enabled %}checked{% endif %}
                  onchange="toggleBuffer(this)">
           <span class="slider-bg"></span>
         </label>
       </div>
       <div class="buffer-status" id="bufferStatus">
-        {% if buffer_enabled %}<span class="on">Enabled</span> — recording and failover active
-        {% else %}<span class="off">Disabled</span> — live stream only, no failover{% endif %}
+        {% if buffer_enabled %}<span class="on">Enabled</span> — local MP3 fallback active
+        {% else %}<span class="off">Disabled</span> — add MP3 files to enable fallback{% endif %}
       </div>
       <div id="bufferBody" class="{% if not buffer_enabled %}buffer-disabled{% endif %}">
       <div class="buf-stats">
         <div class="buf-stat">
           <span class="buf-stat-val" id="bChunks">{{ buf.chunk_count }}</span>
-          <span class="buf-stat-lbl">chunks</span>
+          <span class="buf-stat-lbl">tracks</span>
         </div>
         <div class="buf-stat">
-          <span class="buf-stat-val" id="bCovers">{{ (buf.covers_seconds // 60) }}m</span>
-          <span class="buf-stat-lbl">covered</span>
+          <span class="buf-stat-val" id="bCovers">mp3</span>
+          <span class="buf-stat-lbl">folder</span>
         </div>
         <div class="buf-stat">
           <span class="buf-stat-val" id="bSize">{{ '%.1f' % (buf.total_bytes / 1048576) }}MB</span>
@@ -692,12 +701,12 @@ MAIN_PAGE = """<!doctype html>
              style="width:{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%"></div>
       </div>
       <div class="fill-bar-label">
-        <span id="fillLabel">{{ buf.chunk_count }} / {{ buf.max_chunks }} chunks</span>
+        <span id="fillLabel">{{ buf.chunk_count }} MP3 tracks</span>
         <span id="fillPct">{{ [100, buf.chunk_count * 100 // [buf.max_chunks,1]|max]|min }}%</span>
       </div>
       <div class="chunk-list-wrap">
         <table class="chunk-list">
-          <thead><tr><th>File</th><th>Size</th><th>Age</th></tr></thead>
+          <thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead>
           <tbody id="chunkTable">
             {% for f in buf.files | reverse %}
             <tr>
@@ -706,34 +715,18 @@ MAIN_PAGE = """<!doctype html>
               <td class="dim right" data-ts="{{ f.mtime }}">—</td>
             </tr>
             {% else %}
-            <tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>
+            <tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No MP3 files</td></tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
-      <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear Buffer</button>
+      <button class="btn btn-danger btn-sm" onclick="confirmClear()">Clear MP3 Folder</button>
       </div><!-- /bufferBody -->
     </div>
 
-    <!-- 5. Recording Settings (chunk/buffer/interval) -->
+    <!-- 5. Stream Settings -->
     <div class="card">
-      <div class="card-title">⏺ Recording Settings</div>
-      <div class="slider-row">
-        <div class="slider-header">
-          <span class="slider-label">Chunk Size</span>
-          <span class="slider-value" id="chunkDisplay">{{ cfg.chunk_seconds }}s</span>
-        </div>
-        <input type="range" id="chunkSlider" min="60" max="600" value="{{ cfg.chunk_seconds }}" step="30"
-               oninput="document.getElementById('chunkDisplay').textContent=this.value+'s'">
-      </div>
-      <div class="slider-row">
-        <div class="slider-header">
-          <span class="slider-label">Buffer Duration</span>
-          <span class="slider-value" id="bufferDisplay">{{ cfg.buffer_minutes }}m</span>
-        </div>
-        <input type="range" id="bufferSlider" min="30" max="360" value="{{ cfg.buffer_minutes }}" step="30"
-               oninput="document.getElementById('bufferDisplay').textContent=this.value+'m'">
-      </div>
+      <div class="card-title">⏱ Stream Settings</div>
       <div class="slider-row">
         <div class="slider-header">
           <span class="slider-label">Check Interval</span>
@@ -792,11 +785,11 @@ MAIN_PAGE = """<!doctype html>
 
 </div>
 
-<!-- Clear Buffer confirmation -->
+<!-- Clear MP3 folder confirmation -->
 <div class="overlay" id="clearOverlay">
   <div class="dialog">
-    <h2>Clear buffer?</h2>
-    <p>Deletes all cached audio. If the live stream is down, playback will stop until new chunks are recorded.</p>
+    <h2>Clear MP3 folder?</h2>
+    <p>Deletes all MP3 files in the fallback folder. If the live stream is down, playback will stop until files are added again.</p>
     <div class="btn-row">
       <button class="btn btn-ghost" onclick="closeClear()">Cancel</button>
       <button class="btn btn-danger" onclick="doClear()">Clear</button>
@@ -866,7 +859,7 @@ function classifyLine(line) {
 function appendLog(raw) {
   // Split the journalctl prefix (timestamp + host + unit) from the message
   // Format: "Apr 14 21:52:43 raspberrypi radio.sh[1266]: [radio] ..."
-  const match = raw.match(/^(\w{3}\s+\d+\s+[\d:]+\s+\S+\s+\S+\[\d+\]:\s*)(.*)/);
+  const match = raw.match(/^(\\w{3}\\s+\\d+\\s+[\\d:]+\\s+\\S+\\s+\\S+\\[\\d+\\]:\\s*)(.*)/);
   let prefix = '', msg = raw;
   if (match) { prefix = match[1]; msg = match[2]; }
 
@@ -896,7 +889,7 @@ connectSSE();
 // ── Mode switch ──
 function switchMode(mode) {
   api('/mode', { mode })
-    .then(() => { toast(mode === 'buffer' ? 'Switching to buffer…' : 'Resuming live stream…'); })
+    .then(() => { toast(mode === 'buffer' ? 'Switching to MP3 player…' : 'Resuming live stream…'); })
     .catch(() => toast('Mode switch failed', true));
 }
 
@@ -916,10 +909,9 @@ function updateNP(state, buf) {
     titleEl.textContent    = state.name || state.url || '—';
     subtitleEl.textContent = state.url || '';
   } else if (state.mode === 'buffer' || state.mode === 'forced') {
-    titleEl.textContent    = 'Buffer Playback';
-    const mins = Math.floor((buf.covers_seconds || 0) / 60);
+    titleEl.textContent    = 'MP3 Folder Player';
     const mb   = ((buf.total_bytes || 0) / 1048576).toFixed(1);
-    subtitleEl.textContent = `${buf.chunk_count} chunks · ${mins} min · ${mb} MB on disk`;
+    subtitleEl.textContent = `${buf.chunk_count} tracks · ${mb} MB · ${buf.folder || ''}`;
   } else if (state.mode === 'waiting') {
     titleEl.textContent    = 'Waiting for Stream';
     subtitleEl.textContent = state.url || '';
@@ -935,7 +927,7 @@ function updateNP(state, buf) {
     btn.onclick = () => switchMode('live');
   } else {
     btn.className = 'btn-mode to-buffer';
-    btn.textContent = '↓ Switch to Buffer';
+    btn.textContent = '↓ Switch to MP3 Player';
     btn.onclick = () => switchMode('buffer');
   }
 }
@@ -947,17 +939,17 @@ function updateSvc(status) {
 
 function updateBuffer(buf) {
   document.getElementById('bChunks').textContent = buf.chunk_count;
-  document.getElementById('bCovers').textContent = Math.floor(buf.covers_seconds/60) + 'm';
+  document.getElementById('bCovers').textContent = 'mp3';
   document.getElementById('bSize').textContent   = (buf.total_bytes/1048576).toFixed(1) + 'MB';
 
-  const pct = buf.max_chunks ? Math.min(100, Math.round(buf.chunk_count*100/buf.max_chunks)) : 0;
+  const pct = buf.chunk_count ? 100 : 0;
   document.getElementById('fillBar').style.width    = pct + '%';
-  document.getElementById('fillLabel').textContent  = `${buf.chunk_count} / ${buf.max_chunks} chunks`;
+  document.getElementById('fillLabel').textContent  = `${buf.chunk_count} MP3 tracks`;
   document.getElementById('fillPct').textContent    = pct + '%';
 
   const tbody = document.getElementById('chunkTable');
   if (!buf.files.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No buffer files</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" class="dim" style="text-align:center;padding:1rem">No MP3 files</td></tr>';
     return;
   }
   tbody.innerHTML = [...buf.files].reverse().map(f =>
@@ -975,8 +967,8 @@ function updateBufferEnabledUI(on) {
   body.classList.toggle('buffer-disabled', !on);
   const status = document.getElementById('bufferStatus');
   status.innerHTML = on
-    ? '<span class="on">Enabled</span> — recording and failover active'
-    : '<span class="off">Disabled</span> — live stream only, no failover';
+    ? '<span class="on">Enabled</span> — local MP3 fallback active'
+    : '<span class="off">Disabled</span> — add MP3 files to enable fallback';
   const tog = document.getElementById('bufferToggle');
   if (tog.checked !== on) tog.checked = on;
   // Hide the "Switch to Buffer" mode button when buffer is disabled.
@@ -989,7 +981,8 @@ function toggleBuffer(el) {
   api('/buffer/enable', { enabled: desired })
     .then(d => {
       updateBufferEnabledUI(d.buffer_enabled);
-      toast(d.buffer_enabled ? 'Buffer enabled — recording resumed' : 'Buffer disabled — live only');
+      if (d.buffer) updateBuffer(d.buffer);
+      toast(d.buffer_enabled ? 'MP3 player enabled' : 'MP3 player disabled or empty');
     })
     .catch(() => {
       el.checked = !desired;
@@ -1055,8 +1048,6 @@ volSlider.addEventListener('input', () => {
 function applySettings() {
   const payload = {
     stream_url:     document.getElementById('streamUrl').value.trim(),
-    chunk_seconds:  parseInt(document.getElementById('chunkSlider').value),
-    buffer_minutes: parseInt(document.getElementById('bufferSlider').value),
     check_interval: parseInt(document.getElementById('intervalSlider').value),
     volume:         parseInt(volSlider.value),
   };
@@ -1073,14 +1064,14 @@ function serviceAction(action) {
     .catch(() => toast('Service action failed', true));
 }
 
-// ── Clear buffer ──
+// ── Clear MP3 folder ──
 function confirmClear() { document.getElementById('clearOverlay').classList.add('open'); }
 function closeClear()   { document.getElementById('clearOverlay').classList.remove('open'); }
 function doClear() {
   closeClear();
   api('/buffer/clear', {})
-    .then(d => { toast('Buffer cleared'); updateBuffer(d.buffer); })
-    .catch(() => toast('Failed to clear buffer', true));
+    .then(d => { toast('MP3 folder cleared'); updateBuffer(d.buffer); updateBufferEnabledUI(d.buffer_enabled); })
+    .catch(() => toast('Failed to clear MP3 folder', true));
 }
 
 // ── Presets ──
@@ -1121,7 +1112,7 @@ function removePreset(url) {
 // ── PIN ──
 function changePin() {
   const pin = document.getElementById('newPin').value.trim();
-  if (!/^\d{4,8}$/.test(pin)) return toast('PIN must be 4–8 digits', true);
+  if (!/^\\d{4,8}$/.test(pin)) return toast('PIN must be 4–8 digits', true);
   api('/pin', { pin }).then(() => {
     toast('PIN updated'); document.getElementById('newPin').value = '';
   }).catch(() => toast('Failed to update PIN', true));
@@ -1175,14 +1166,15 @@ def dashboard():
     if not require_auth():
         return redirect(url_for("index"))
     cfg = load_config()
+    buf = buffer_info()
     return render_template_string(
         MAIN_PAGE,
         cfg=cfg,
         state=playback_state(),
         svc_status=service_status(),
-        buf=buffer_info(),
+        buf=buf,
         spotify_on=spotify_active(),
-        buffer_enabled=bool(cfg.get("buffer_enabled", True)),
+        buffer_enabled=bool(cfg.get("buffer_enabled", False)) and buf["available"],
     )
 
 
@@ -1230,27 +1222,31 @@ def get_status():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
     cfg = load_config()
+    buf = buffer_info()
     return jsonify({
         "svc_status":     service_status(),
         "state":          playback_state(),
-        "buffer":         buffer_info(),
+        "buffer":         buf,
         "spotify_on":     spotify_active(),
-        "buffer_enabled": bool(cfg.get("buffer_enabled", True)),
+        "buffer_enabled": bool(cfg.get("buffer_enabled", False)) and buf["available"],
     })
 
 
 @app.route("/buffer/enable", methods=["POST"])
 def toggle_buffer():
-    """Enable/disable the rolling buffer.
+    """Enable/disable the MP3 folder fallback player.
 
-    When disabled, radio.sh skips recording and skips failover playback —
-    it simply retries the live stream. Live audio continues uninterrupted
-    if the stream is currently up.
+    When disabled or empty, radio.sh skips fallback playback and simply
+    retries the live stream. Live audio continues uninterrupted if the
+    stream is currently up.
     """
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
     enabled = bool(request.get_json(force=True).get("enabled", True))
     cfg = load_config()
+    buf = buffer_info()
+    if enabled and not buf["available"]:
+        enabled = False
     cfg["buffer_enabled"] = enabled
     save_config(cfg)
     # Clear any forced-buffer flag — it'd be ignored anyway with buffer off.
@@ -1260,7 +1256,7 @@ def toggle_buffer():
         except FileNotFoundError:
             pass
     subprocess.run(["systemctl", "restart", "radio.service"], timeout=10)
-    return jsonify({"ok": True, "buffer_enabled": enabled})
+    return jsonify({"ok": True, "buffer_enabled": enabled, "buffer": buffer_info()})
 
 
 @app.route("/spotify", methods=["POST"])
@@ -1292,6 +1288,10 @@ def set_mode():
         return jsonify({"error": "unauthorized"}), 401
     mode = request.get_json(force=True).get("mode", "")
     if mode == "buffer":
+        cfg = load_config()
+        buf = buffer_info()
+        if not cfg.get("buffer_enabled", False) or not buf["available"]:
+            return jsonify({"error": "MP3 player is disabled or empty"}), 400
         open(FORCE_BUFFER, "w").close()
         subprocess.run(["systemctl", "restart", "radio.service"], timeout=10)
     elif mode == "live":
@@ -1347,13 +1347,21 @@ def service_action(action):
 def clear_buffer():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
+    cfg = load_config()
+    mp3_dir = cfg.get("mp3_player_dir", MP3_PLAYER_DIR)
     try:
-        for name in os.listdir(BUFFER_DIR):
-            if name.endswith(".mp3") or name.endswith(".m3u"):
-                os.remove(os.path.join(BUFFER_DIR, name))
+        for name in os.listdir(mp3_dir):
+            if name.lower().endswith(".mp3") or name.lower().endswith(".m3u"):
+                os.remove(os.path.join(mp3_dir, name))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    return jsonify({"ok": True, "buffer": buffer_info()})
+    cfg["buffer_enabled"] = False
+    save_config(cfg)
+    try:
+        os.remove(FORCE_BUFFER)
+    except FileNotFoundError:
+        pass
+    return jsonify({"ok": True, "buffer": buffer_info(), "buffer_enabled": False})
 
 
 @app.route("/presets/add", methods=["POST"])

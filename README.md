@@ -1,10 +1,10 @@
 # 🎵 RadioResurrector
 
 A self-healing radio stream system for Raspberry Pi.  
-It continuously streams and records an online radio feed, keeping a rolling 2-hour backup.  
-If the internet or stream goes down, it automatically switches to the cached buffer until the connection returns — then seamlessly resumes live playback.
+It continuously streams an online radio feed.  
+If the internet or stream goes down, it can switch to a local MP3 folder player until the connection returns — then seamlessly resumes live playback.
 
-A **PIN-protected web interface** lets you control everything from any device on your network — change streams, adjust volume, tune chunk sizes, and manage the buffer, all without touching the Pi.
+A **PIN-protected web interface** lets you control everything from any device on your network — change streams, adjust volume, and manage the local MP3 fallback, all without touching the Pi.
 
 ---
 
@@ -40,8 +40,7 @@ The default PIN is **1234** — change it immediately from the dashboard.
 |---|---|
 | **Volume** | Live slider — updates the audio level instantly |
 | **Stream URL** | Paste any stream URL, or choose a saved preset |
-| **Chunk Size** | How many seconds per buffer file (60–600 s) |
-| **Buffer Duration** | How much history to keep (30–360 min) |
+| **MP3 Player** | Optional fallback that loops every `.mp3` in `/opt/radio/mp3` |
 | **Check Interval** | How often to test the live stream (5–60 s) |
 | **Apply & Restart** | Saves all settings and restarts the radio service |
 | **Start / Restart / Stop** | Direct service controls |
@@ -69,7 +68,7 @@ To simulate an internet outage:
 sudo ip route add blackhole 0.0.0.0/0
 ```
 
-Wait ~10 seconds; the Pi should begin playing from the buffer.  
+When the MP3 player is enabled and `/opt/radio/mp3` contains MP3 files, the Pi should begin looping those files. The MP3 player is disabled by default and remains disabled when the folder is empty.
 Restore the connection:
 ```bash
 sudo ip route del blackhole 0.0.0.0/0
@@ -86,7 +85,8 @@ sudo ip route del blackhole 0.0.0.0/0
  ├── config.json      # Settings (managed by web UI)
  ├── config.sh        # Shell-sourced config (written by web UI)
  ├── README.md        # Documentation
- └── buffer/          # Rolling audio buffer
+ ├── buffer/          # Legacy install directory
+ └── mp3/             # Local MP3 fallback folder
 /etc/systemd/system/radio.service
 /etc/systemd/system/radio-web.service
 ```
@@ -95,9 +95,9 @@ sudo ip route del blackhole 0.0.0.0/0
 
 # 6. Maintenance
 
-Clear buffer files:
+Clear local fallback MP3 files:
 ```bash
-sudo rm -f /opt/radio/buffer/*.mp3
+sudo rm -f /opt/radio/mp3/*.mp3
 ```
 
 Restart both services:
