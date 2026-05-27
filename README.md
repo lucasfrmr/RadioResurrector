@@ -1,8 +1,8 @@
 # 🎵 RadioResurrector
 
-A self-healing radio stream system for Raspberry Pi.  
-It continuously streams and records an online radio feed, keeping a rolling 2-hour backup.  
-If the internet or stream goes down, it automatically switches to the cached buffer until the connection returns — then seamlessly resumes live playback.
+A self-healing radio stream system for Raspberry Pi.
+It streams an online radio feed and can optionally record a rolling backup buffer.
+Buffer recording and failover are disabled by default. When enabled, failover is only used when the internet connection is down; normal stream glitches are retried live.
 
 A **PIN-protected web interface** lets you control everything from any device on your network — change streams, adjust volume, tune chunk sizes, and manage the buffer, all without touching the Pi.
 
@@ -42,7 +42,8 @@ The default PIN is **1234** — change it immediately from the dashboard.
 | **Stream URL** | Paste any stream URL, or choose a saved preset |
 | **Chunk Size** | How many seconds per buffer file (60–600 s) |
 | **Buffer Duration** | How much history to keep (30–360 min) |
-| **Check Interval** | How often to test the live stream (5–60 s) |
+| **Check Interval** | How often to test internet connectivity (5–60 s) |
+| **Buffer** | Optional rolling backup recording and internet-outage failover, disabled by default |
 | **Apply & Restart** | Saves all settings and restarts the radio service |
 | **Start / Restart / Stop** | Direct service controls |
 | **Stream Presets** | Save and manage favourite stream URLs |
@@ -69,7 +70,8 @@ To simulate an internet outage:
 sudo ip route add blackhole 0.0.0.0/0
 ```
 
-Wait ~10 seconds; the Pi should begin playing from the buffer.  
+Enable the buffer in the web UI first.
+Wait ~10 seconds; the Pi should begin playing from the buffer.
 Restore the connection:
 ```bash
 sudo ip route del blackhole 0.0.0.0/0

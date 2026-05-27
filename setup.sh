@@ -158,6 +158,7 @@ cfg = {
     "buffer_minutes": 120,
     "check_interval": 10,
     "volume":         90,
+    "buffer_enabled": False,
     "streams": [
         {"name": os.environ["STREAM_NAME"], "url": os.environ["STREAM_URL"]},
     ],
@@ -176,6 +177,7 @@ BUFFER_MINUTES=120
 MAX_CHUNKS=\$(( BUFFER_MINUTES * 60 / CHUNK_SECONDS ))
 CHECK_INTERVAL=10
 VOLUME=90
+BUFFER_ENABLED=0
 EOF
 
   chown "$RADIO_USER":"$RADIO_USER" "$INSTALL_DIR/config.json" "$INSTALL_DIR/config.sh"

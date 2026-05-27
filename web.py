@@ -17,6 +17,7 @@ CONFIG_SH        = os.path.join(BASE_DIR, "config.sh")
 BUFFER_DIR       = os.path.join(BASE_DIR, "buffer")
 STATE_FILE       = os.path.join(BASE_DIR, "state.json")
 FORCE_BUFFER     = os.path.join(BASE_DIR, "force_buffer")
+APP_VERSION      = "1.02"
 
 os.makedirs(BUFFER_DIR, exist_ok=True)  # ensure dirs exist in dev too
 
@@ -30,7 +31,7 @@ DEFAULT_CONFIG = {
     "buffer_minutes": 120,
     "check_interval": 10,
     "volume": 90,
-    "buffer_enabled": True,
+    "buffer_enabled": False,
     "streams": [
         {"name": "Example Stream", "url": "https://findyourownstream.example/stream"}
     ],
@@ -64,7 +65,7 @@ def write_shell_config(cfg):
         f.write(f'MAX_CHUNKS=$(( BUFFER_MINUTES * 60 / CHUNK_SECONDS ))\n')
         f.write(f'CHECK_INTERVAL={cfg["check_interval"]}\n')
         f.write(f'VOLUME={cfg["volume"]}\n')
-        f.write(f'BUFFER_ENABLED={1 if cfg.get("buffer_enabled", True) else 0}\n')
+        f.write(f'BUFFER_ENABLED={1 if cfg.get("buffer_enabled", False) else 0}\n')
 
 
 def service_status(unit="radio.service"):
@@ -80,6 +81,18 @@ def service_status(unit="radio.service"):
 
 def spotify_active():
     return service_status("raspotify.service") == "active"
+
+
+def volume_to_alsa(vol):
+    """Map UI volume to the Pi's usable PCM range.
+
+    On this hardware, PCM values at or below about 50% are effectively silent.
+    Keep 0 as true mute, then spread 1-100 across 51-100.
+    """
+    vol = max(0, min(100, int(vol)))
+    if vol <= 0:
+        return 0
+    return 50 + ((vol * 50 + 99) // 100)
 
 
 def playback_state():
@@ -194,9 +207,16 @@ PIN_PAGE = """<!doctype html>
   }
   button:hover { background: #6d28d9; }
   .error { color: #f87171; font-size: .9rem; margin-bottom: 1rem; }
+  .version-badge {
+    position: fixed; top: 1rem; right: 1rem;
+    border: 1px solid #2a2a4a; border-radius: 999px;
+    color: #666; font-size: .72rem; font-weight: 700;
+    padding: .28rem .65rem;
+  }
 </style>
 </head>
 <body>
+<span class="version-badge">v{{ app_version }}</span>
 <div class="card">
   <div class="logo">📻</div>
   <h1>RadioResurrector</h1>
@@ -251,6 +271,12 @@ MAIN_PAGE = """<!doctype html>
   .logo-group { display: flex; align-items: center; gap: .6rem; }
   .logo-group span:first-child { font-size: 1.6rem; }
   .logo-group h1 { font-size: 1.1rem; color: var(--accent-light); font-weight: 700; }
+  .header-actions { display: flex; align-items: center; gap: .7rem; }
+  .version-badge {
+    border: 1px solid var(--border); border-radius: 999px;
+    color: var(--muted); font-size: .72rem; font-weight: 700;
+    padding: .28rem .65rem; white-space: nowrap;
+  }
   .logout {
     background: none; border: 1px solid var(--border); border-radius: 8px;
     color: var(--muted); cursor: pointer; font-size: .8rem; padding: .4rem .8rem;
@@ -556,9 +582,12 @@ MAIN_PAGE = """<!doctype html>
     <span>📻</span>
     <h1>RadioResurrector</h1>
   </div>
-  <form action="/logout" method="post">
-    <button class="logout" type="submit">Logout</button>
-  </form>
+  <div class="header-actions">
+    <span class="version-badge">v{{ app_version }}</span>
+    <form action="/logout" method="post">
+      <button class="logout" type="submit">Logout</button>
+    </form>
+  </div>
 </header>
 
 <div class="dashboard-grid">
@@ -866,7 +895,7 @@ function classifyLine(line) {
 function appendLog(raw) {
   // Split the journalctl prefix (timestamp + host + unit) from the message
   // Format: "Apr 14 21:52:43 raspberrypi radio.sh[1266]: [radio] ..."
-  const match = raw.match(/^(\w{3}\s+\d+\s+[\d:]+\s+\S+\s+\S+\[\d+\]:\s*)(.*)/);
+  const match = raw.match(/^(\\w{3}\\s+\\d+\\s+[\\d:]+\\s+\\S+\\s+\\S+\\[\\d+\\]:\\s*)(.*)/);
   let prefix = '', msg = raw;
   if (match) { prefix = match[1]; msg = match[2]; }
 
@@ -1121,7 +1150,7 @@ function removePreset(url) {
 // ── PIN ──
 function changePin() {
   const pin = document.getElementById('newPin').value.trim();
-  if (!/^\d{4,8}$/.test(pin)) return toast('PIN must be 4–8 digits', true);
+  if (!/^\\d{4,8}$/.test(pin)) return toast('PIN must be 4–8 digits', true);
   api('/pin', { pin }).then(() => {
     toast('PIN updated'); document.getElementById('newPin').value = '';
   }).catch(() => toast('Failed to update PIN', true));
@@ -1166,8 +1195,8 @@ def index():
         if request.form.get("pin") == cfg["pin"]:
             session["authed"] = True
             return redirect(url_for("dashboard"))
-        return render_template_string(PIN_PAGE, error="Incorrect PIN — try again")
-    return render_template_string(PIN_PAGE, error=None)
+        return render_template_string(PIN_PAGE, error="Incorrect PIN — try again", app_version=APP_VERSION)
+    return render_template_string(PIN_PAGE, error=None, app_version=APP_VERSION)
 
 
 @app.route("/dashboard")
@@ -1182,7 +1211,8 @@ def dashboard():
         svc_status=service_status(),
         buf=buffer_info(),
         spotify_on=spotify_active(),
-        buffer_enabled=bool(cfg.get("buffer_enabled", True)),
+        buffer_enabled=bool(cfg.get("buffer_enabled", False)),
+        app_version=APP_VERSION,
     )
 
 
@@ -1235,7 +1265,7 @@ def get_status():
         "state":          playback_state(),
         "buffer":         buffer_info(),
         "spotify_on":     spotify_active(),
-        "buffer_enabled": bool(cfg.get("buffer_enabled", True)),
+        "buffer_enabled": bool(cfg.get("buffer_enabled", False)),
     })
 
 
@@ -1326,11 +1356,12 @@ def set_volume():
     if not require_auth():
         return jsonify({"error": "unauthorized"}), 401
     vol = max(0, min(100, int(request.get_json(force=True).get("volume", 90))))
-    subprocess.run(["amixer", "sset", "PCM", f"{vol}%"], capture_output=True)
+    alsa_vol = volume_to_alsa(vol)
+    subprocess.run(["amixer", "sset", "PCM", f"{alsa_vol}%"], capture_output=True)
     cfg = load_config()
     cfg["volume"] = vol
     save_config(cfg)
-    return jsonify({"ok": True, "volume": vol})
+    return jsonify({"ok": True, "volume": vol, "alsa_volume": alsa_vol})
 
 
 @app.route("/service/<action>", methods=["POST"])
